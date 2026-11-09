@@ -13,7 +13,7 @@ test('worker prevents overlapping passes and stops cleanly without invoking a re
     storage: { get: async key => store.get(key), set: async (key, value) => store.set(key, value) },
     commands: { register: (id, fn) => commands.set(id, fn) },
     events: { on: () => ({ dispose: () => { disposed = true; } }) },
-    host: { call: async (name, args) => { calls.push([name, args]); return {}; } },
+    host: { has: name => name === 'workspace.rename', call: async (name, args) => { calls.push([name, args]); return {}; } },
     log: () => {}
   };
   try {
@@ -28,4 +28,21 @@ test('worker prevents overlapping passes and stops cleanly without invoking a re
     assert.equal(store.size, 0);
     assert.equal(calls.length, 0);
   } finally { deactivate(); adapter.snapshot = original; }
+});
+
+test('waits for an Orca with workspace.rename instead of reaching for private APIs', async () => {
+  const calls = [];
+  const commands = new Map();
+  const host = {
+    storage: { get: async () => undefined, set: async () => {} },
+    commands: { register: (id, fn) => commands.set(id, fn) },
+    events: { on: () => { throw new Error('should not subscribe'); } },
+    host: { has: () => false, call: async (name, args) => { calls.push([name, args]); return {}; } },
+    log: () => {}
+  };
+  try {
+    activate(host);
+    assert.deepEqual(await commands.get('naming.preview')(), { error: 'orca_too_old' });
+    assert.deepEqual(calls.map(([name]) => name), ['statusBar.update']);
+  } finally { deactivate(); }
 });

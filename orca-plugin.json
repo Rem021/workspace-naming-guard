@@ -4,8 +4,8 @@
   "execution": "trusted-worker",
   "id": "workspace-naming-guard",
   "name": "Workspace Naming Guard",
-  "version": "1.0.2",
-  "description": "Automatically normalizes Orca workspace and Git worktree names to 'Project｜Topic' (supporting both English and Chinese topics) from agent chat titles and initial prompts via zero-latency local RPC, while preserving manual edits.",
+  "version": "1.1.0",
+  "description": "Automatically normalizes Orca workspace and Git worktree names to 'Project｜Topic' (supporting both English and Chinese topics) from agent chat titles and initial prompts through Orca's plugin host API, while preserving manual edits.",
   "author": {
     "name": "Rem021",
     "url": "https://github.com/Rem021"
@@ -21,6 +21,12 @@
   "capabilities": [
     {
       "kind": "workspace:read"
+    },
+    {
+      "kind": "workspace:write"
+    },
+    {
+      "kind": "agent:read"
     },
     {
       "kind": "storage:own"

@@ -1,203 +1,74 @@
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
-import { readFile, stat } from 'node:fs/promises';
-import { homedir } from 'node:os';
-import { join } from 'node:path';
-import { createConnection } from 'node:net';
-import { randomUUID } from 'node:crypto';
-import { isGenericChatTitle } from './core.mjs';
+// Orca's plugin host API: workspace.list, agents.list, workspace.readContext and workspace.rename.
+// Each call is checked against the capabilities in orca-plugin.json, so the plugin never needs
+// Orca's private runtime token, the runtime socket, or files under Orca's application data.
 
-const run = promisify(execFile);
-const VOLUME = (process.env.AI_VOLUME_PATH || '/Volumes/AI_Workspace').replace(/\/+$/, '');
-const EXPECTED_UUID = process.env.AI_VOLUME_UUID ?? 'AUTO';
-const JOURNAL_DB_PATH = join(homedir(), 'Library/Application Support/orca/agent-session-journal.db');
-const HOST_VERIFY_TTL_MS = 60_000;
-let lastHostVerifyAt = 0;
+let host = null;
 
-export async function verifyHost() {
-  const now = Date.now();
-  if (now - lastHostVerifyAt < HOST_VERIFY_TTL_MS) {
-    if (VOLUME.startsWith('/Volumes/')) {
-      await stat(VOLUME).catch(() => {
-        lastHostVerifyAt = 0;
-        throw new Error('wrong_or_missing_volume');
-      });
-    }
-    return;
-  }
-  const { stdout } = await run('/usr/libexec/PlistBuddy', ['-c', 'Print :CFBundleShortVersionString', '/Applications/Orca.app/Contents/Info.plist']);
-  const ver = /^(\d+)\.(\d+)\.(\d+)/.exec(stdout.trim());
-  if (!ver || Number(ver[1]) < 1 || (Number(ver[1]) === 1 && (Number(ver[2]) < 4 || (Number(ver[2]) === 4 && Number(ver[3]) < 250)))) {
-    throw new Error('unsupported_orca_version');
-  }
-  if (VOLUME.startsWith('/Volumes/') && EXPECTED_UUID && EXPECTED_UUID !== 'AUTO') {
-    const { stdout: volume } = await run('/usr/sbin/diskutil', ['info', '-plist', VOLUME]);
-    if (!volume.includes(`<string>${EXPECTED_UUID}</string>`)) throw new Error('wrong_or_missing_volume');
-  }
-  lastHostVerifyAt = now;
+function call(method, params = {}) {
+  if (!host) throw new Error('not_activated');
+  return host.host.call(method, params);
 }
 
-async function rpcBatch(calls, errorCode = 'orca_command_failed') {
-  const meta = JSON.parse(await readFile(join(homedir(), 'Library/Application Support/Orca/orca-runtime.json'), 'utf8'));
-  const endpoint = (meta.transports ?? [meta.transport]).find(t => t?.kind === 'unix')?.endpoint;
-  if (typeof endpoint !== 'string' || !endpoint.startsWith('/') || !meta.authToken) throw new Error('runtime_unavailable');
-
-  const pending = new Map();
-  const results = new Array(calls.length);
-  const payloads = calls.map((c, index) => {
-    const id = randomUUID();
-    pending.set(id, { index, method: c.method });
-    return JSON.stringify({ id, authToken: meta.authToken, method: c.method, params: c.params ?? {} }) + '\n';
-  });
-
-  return new Promise((resolve, reject) => {
-    const socket = createConnection(endpoint);
-    let buffer = '';
-    const fail = e => {
-      socket.destroy();
-      const msg = e?.message;
-      reject(new Error(msg && /^[a-z_]+$/.test(msg) ? msg : errorCode));
-    };
-    socket.setTimeout(15000, () => fail());
-    socket.on('error', fail);
-    socket.on('end', () => {
-      if (pending.size > 0) fail();
-    });
-    socket.on('connect', () => {
-      socket.write(payloads.join(''));
-    });
-    socket.on('data', data => {
-      buffer += data.toString();
-      if (buffer.length > 16 * 1024 * 1024) return fail();
-      let end;
-      while ((end = buffer.indexOf('\n')) >= 0) {
-        const line = buffer.slice(0, end);
-        buffer = buffer.slice(end + 1);
-        try {
-          const d = JSON.parse(line);
-          const item = pending.get(d.id);
-          if (!item) continue;
-          pending.delete(d.id);
-          if (!d.ok) throw new Error(d.error?.code ?? errorCode);
-          results[item.index] = d.result;
-          if (pending.size === 0) {
-            socket.removeAllListeners('end');
-            socket.destroy();
-            resolve(results);
-            return;
-          }
-        } catch (e) {
-          return fail(e);
-        }
-      }
-    });
-  });
+/** workspace.rename arrived in host API 1.5; older Orca builds do not offer it. */
+export function renameSupported(orca = host) {
+  return typeof orca?.host?.has === 'function' && orca.host.has('workspace.rename');
 }
 
-async function fetchJournalFallbackPrompts(sessionIds) {
-  const validIds = [...new Set(sessionIds.filter(id => typeof id === 'string' && /^[A-Za-z0-9_-]+$/.test(id)))];
-  if (validIds.length === 0) return new Map();
-  try {
-    const quoted = validIds.map(id => `'${id}'`).join(',');
-    const sql = `
-      SELECT g.session_id, o.value_json
-      FROM journal_outcome_generations g
-      JOIN journal_outcomes o ON o.generation = g.generation
-      WHERE g.session_id IN (${quoted})
-        AND o.field = 'items'
-        AND o.deleted = 0
-        AND o.value_json LIKE '%"role":"user"%'
-      ORDER BY g.generation ASC, o.ordinal ASC;
-    `;
-    const { stdout } = await run('/usr/bin/sqlite3', ['-readonly', '-json', JOURNAL_DB_PATH, sql], { timeout: 3000, maxBuffer: 4 * 1024 * 1024 });
-    const rows = stdout.trim() ? JSON.parse(stdout) : [];
-    const map = new Map();
-    for (const r of rows) {
-      if (map.has(r.session_id)) continue;
-      try {
-        const item = JSON.parse(r.value_json);
-        const text = (item?.body?.blocks ?? [])
-          .filter(b => b?.type === 'text' && typeof b.text === 'string')
-          .map(b => b.text.trim())
-          .filter(t => t && !/^────\s*From:\s*STRUCTWORKER_/i.test(t))
-          .join('\n');
-        if (text && /[\u4e00-\u9fff]/.test(text)) {
-          map.set(r.session_id, text);
-        }
-      } catch {}
-    }
-    return map;
-  } catch {
-    return new Map();
-  }
+/** Workspaces as core.mjs reads them: `repoId` and the repo's `displayName` are the project name. */
+export function toWorktrees(workspaces) {
+  return workspaces
+    .filter(w => typeof w.project === 'string' && w.project.trim())
+    .map(w => ({
+      id: w.id,
+      repoId: w.project,
+      path: w.path,
+      // null means this machine on hosts that do not record one.
+      hostId: w.hostId ?? 'local',
+      branch: w.branch ?? undefined,
+      displayName: w.name
+    }));
 }
 
-async function parseTabSnapshots(raw) {
-  if (!Array.isArray(raw?.snapshots)) throw new Error('incompatible_tab_schema');
-  const genericSessionIds = [];
-  for (const s of raw.snapshots) {
-    if (typeof s.worktree !== 'string' || !Array.isArray(s.tabs)) throw new Error('incompatible_tab_schema');
-    for (const t of s.tabs) {
-      if (t.type === 'agent-session' && isGenericChatTitle(t.title) && typeof t.sessionId === 'string') {
-        genericSessionIds.push(t.sessionId);
-      }
-    }
-  }
-  const fallbackMap = await fetchJournalFallbackPrompts(genericSessionIds);
-  return raw.snapshots.map(s => ({
-    worktree: s.worktree,
-    tabs: s.tabs.filter(t => t.type === 'agent-session').map(t => ({
-      type: t.type,
-      title: t.title,
-      ...(t.sessionId && fallbackMap.has(t.sessionId) ? { fallbackPrompt: fallbackMap.get(t.sessionId) } : {})
-    }))
-  }));
+async function listWorktrees() {
+  const { workspaces } = await call('workspace.list');
+  return toWorktrees(workspaces);
 }
 
-export async function tabSnapshots() {
-  const [res] = await rpcBatch([{ method: 'session.tabs.listAll', params: {} }], 'tab_snapshot_unavailable');
-  return parseTabSnapshots(res);
+/** The focused workspace's agent titles. Orca reports agents of the focused workspace only, so a
+ * workspace is named once it has been focused with an agent in it. */
+async function focusedSnapshots(worktrees) {
+  const context = await call('workspace.readContext');
+  if (!context) return [];
+  // readContext has no id: the focused workspace is the one listed with its name and branch.
+  const matches = worktrees.filter(w => w.displayName === context.displayName && (w.branch ?? '') === (context.branch ?? ''));
+  if (matches.length !== 1) return [];
+  const { agents } = await call('agents.list');
+  const titles = agents.map(a => a.title).filter(t => typeof t === 'string' && t.trim());
+  return [{ worktree: matches[0].id, tabs: titles.map(title => ({ type: 'agent-session', title })) }];
 }
 
 export const adapter = {
+  bind(orca) {
+    host = orca;
+  },
   async tabsOnly() {
-    await verifyHost();
-    return tabSnapshots();
+    return focusedSnapshots(await listWorktrees());
   },
   async snapshot(preloadedSnapshots = null) {
-    await verifyHost();
-    if (preloadedSnapshots) {
-      const [w, r] = await rpcBatch([
-        { method: 'worktree.list', params: { limit: 10000 } },
-        { method: 'repo.list', params: {} }
-      ], 'orca_command_failed');
-      if (!Array.isArray(w?.worktrees) || !Array.isArray(r?.repos)) throw new Error('incompatible_workspace_schema');
-      return {
-        worktrees: w.worktrees,
-        repos: r.repos.map(x => ({ id: x.id, displayName: x.displayName })),
-        snapshots: preloadedSnapshots
-      };
-    }
-    const [w, r, rawTabs] = await rpcBatch([
-      { method: 'worktree.list', params: { limit: 10000 } },
-      { method: 'repo.list', params: {} },
-      { method: 'session.tabs.listAll', params: {} }
-    ], 'orca_command_failed');
-    if (!Array.isArray(w?.worktrees) || !Array.isArray(r?.repos)) throw new Error('incompatible_workspace_schema');
+    const worktrees = await listWorktrees();
+    const projects = [...new Set(worktrees.map(w => w.repoId))];
     return {
-      worktrees: w.worktrees,
-      repos: r.repos.map(x => ({ id: x.id, displayName: x.displayName })),
-      snapshots: await parseTabSnapshots(rawTabs)
+      worktrees,
+      repos: projects.map(name => ({ id: name, displayName: name })),
+      snapshots: preloadedSnapshots ?? (await focusedSnapshots(worktrees))
     };
   },
   async current(id) {
-    const [res] = await rpcBatch([{ method: 'worktree.show', params: { worktree: `id:${id}` } }]);
-    return res?.worktree ?? null;
+    return (await listWorktrees()).find(w => w.id === id) ?? null;
   },
   async rename(id, name) {
-    const [res] = await rpcBatch([
-      { method: 'worktree.set', params: { worktree: `id:${id}`, displayName: name, firstAgentMessageRenameError: null } }
-    ]);
-    return res;
+    await call('workspace.rename', { workspaceId: id, name });
+    // applyPlan reads the name back with current().
+    return null;
   }
 };
