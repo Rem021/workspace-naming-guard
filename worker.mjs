@@ -1,4 +1,4 @@
-import { adapter } from './adapter.mjs';
+import { adapter, renameSupported } from './adapter.mjs';
 import { planNames, applyPlan } from './core.mjs';
 
 let interval, delayed, subscription, stopped = false, busy = false, lastTabSig = null;
@@ -20,7 +20,30 @@ function tabSignature(snapshots) {
 export default function activate(orca) {
   stopped = false;
   lastTabSig = null;
+  adapter.bind(orca);
   const persist = value => orca.storage.set('state-v1', value);
+
+  if (!renameSupported(orca)) {
+    orca.commands.register('naming.preview', () => ({ error: 'orca_too_old' }));
+    void orca.host.call('statusBar.update', {
+      id: 'naming',
+      text: 'Naming Check',
+      tone: 'warning',
+      tooltip: 'Workspace Naming Guard needs an Orca version with workspace.rename (host API 1.5)'
+    });
+    return;
+  }
+
+  // Only workspaces created while the plugin runs are named: the host API does not say which
+  // workspace is a repository's main checkout, and a person's existing names stay untouched.
+  const trackedKey = 'tracked-v1';
+  async function track(path) {
+    if (typeof path !== 'string' || !path) return;
+    const tracked = (await orca.storage.get(trackedKey)) ?? {};
+    tracked[path] = Date.now();
+    const recent = Object.entries(tracked).sort((a, b) => b[1] - a[1]).slice(0, 2000);
+    await orca.storage.set(trackedKey, Object.fromEntries(recent));
+  }
 
   async function reconcile(preview = false, forceFull = true) {
     preview = preview || process.env.ORCA_NAMING_READ_ONLY === '1';
@@ -49,7 +72,9 @@ export default function activate(orca) {
         state.pending = null;
         if (!preview) await persist(state);
       }
-      const plan = planNames(s.worktrees, s.repos, s.snapshots, state.records);
+      const tracked = (await orca.storage.get(trackedKey)) ?? {};
+      const managed = s.worktrees.filter(w => tracked[w.path] || state.records[w.id]);
+      const plan = planNames(managed, s.repos, s.snapshots, state.records);
       if (preview) return { pending: plan, recent: state.history.slice(-10) };
       const count = await applyPlan(plan.slice(0, 25), adapter, state, persist, () => stopped);
       await orca.host.call('statusBar.update', {
@@ -71,9 +96,11 @@ export default function activate(orca) {
   }
 
   orca.commands.register('naming.preview', () => reconcile(true, true));
-  subscription = orca.events.on('workspace.created', () => {
-    clearTimeout(delayed);
-    delayed = setTimeout(() => void reconcile(false, true), 350);
+  subscription = orca.events.on('workspace.created', ev => {
+    void track(ev?.path).then(() => {
+      clearTimeout(delayed);
+      delayed = setTimeout(() => void reconcile(false, true), 350);
+    });
   });
   interval = setInterval(() => void reconcile(false, false), 4000);
   void reconcile(false, true);
