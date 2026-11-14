@@ -56,6 +56,7 @@ export type Plan = {
 const WIDE = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u
 const GENERIC_HEADS = new Set(['agent', 'ai', 'assistant', 'chat', 'workspace', 'task', 'orca', '工作区', '项目', '任务'])
 const DEFAULT_BRANCHES = new Set(['main', 'master', 'trunk', 'develop', 'dev'])
+const PLACEHOLDER = /^(?:(?:new|untitled)(?:\s+(?:chat|session|workspace|task))?|新(?:建)?(?:聊天|会话|工作区)|未命名(?:工作区|会话)?)(?:[\s-]*\d+)?$/iu
 const POLITE_LEAD = /^(?:请问|请帮我|请你|帮我|麻烦你|麻烦|我想要|我想|我要|我们需要|能不能|可以帮我|please\s+help\s+me\s+(?:to\s+)?|please\s+|can\s+you\s+|could\s+you\s+|help\s+me\s+(?:to\s+)?|let'?s\s+)/iu
 
 /** Trims, joins `｜` (or `|`) tightly and puts one space between Han characters and Latin letters or digits. */
@@ -108,13 +109,13 @@ export function projectPrefix(project: string, aliases: Record<string, string>):
 /** A slug such as `blobfish`, `codex/mojarra` or `main`: one token, nothing a person would read as a topic. */
 export function isSlug(name: string): boolean {
   const s = name.trim()
-  return !s || (!WIDE.test(s) && !/\s/.test(s))
+  return !s || PLACEHOLDER.test(s) || (!WIDE.test(s) && !/\s/.test(s))
 }
 
 /** Text worth using as a topic: Chinese, Japanese or Korean text, or at least two words in any script. */
 export function isMeaningfulTopic(text: string): boolean {
   const s = text.trim()
-  if (!s || /^(?:new|untitled)(?:\s+(?:chat|session|workspace))?$/i.test(s)) return false
+  if (!s || PLACEHOLDER.test(s)) return false
   if (WIDE.test(s)) return true
   return /[\p{L}\p{N}]{2,}[^\p{L}\p{N}]+[\p{L}\p{N}]{2,}/u.test(s)
 }
@@ -171,14 +172,14 @@ export function standbyName(prefix: string, label: string, suffix: string): stri
 
 /**
  * The project's own checkout or root folder: never renamed. That is a worktree on a default
- * branch, a worktree in a folder named after the project, or a workspace named after it.
+ * branch, a branched worktree in a folder named after the project, or a workspace named after it.
  */
 export function isProjectRoot(ws: Workspace): boolean {
   const project = normalize(ws.project ?? '').toLowerCase()
   if (ws.kind === 'worktree') {
     if (ws.branch && DEFAULT_BRANCHES.has(ws.branch.replace(/^refs\/heads\//, ''))) return true
     const folder = ws.path.replace(/[\\/]+$/, '').split(/[\\/]/).pop() ?? ''
-    if (project && normalize(folder).toLowerCase() === project) return true
+    if (ws.branch && project && normalize(folder).toLowerCase() === project) return true
   }
   return Boolean(project) && normalize(ws.name).toLowerCase() === project
 }
@@ -224,6 +225,10 @@ export function proposeName(
   if (fromBranch && isSlug(name)) {
     return { after: `${prefix}${SEP}${fromBranch}`, reason: 'branch', stage: 'final' }
   }
+
+  // CLI-created folder workspaces also carry meaningful dashed names, but no branch.
+  const fromName = isSlug(name) && /[-_/]/.test(name) ? cleanTopic(topicFromBranch(name)) : ''
+  if (fromName) return { after: `${prefix}${SEP}${fromName}`, reason: 'agent-title', stage: 'final' }
 
   if (allowStandby && options.standbyNames && isSlug(name)) {
     return { after: standbyName(prefix, options.standbyLabel, standbySuffix), reason: 'standby', stage: 'standby' }

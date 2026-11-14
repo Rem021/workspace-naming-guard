@@ -18,7 +18,8 @@ const MAX_RENAMES_PER_PASS = 10
 const MAX_APPLY = 50
 const HISTORY_LIMIT = 200
 const DAY_MS = 24 * 60 * 60_000
-const DEFAULT_STANDBY_LABEL = 'Standby'
+const DEFAULT_STANDBY_LABEL = '待命工作区'
+const TITLE_GRACE_MS = 60_000
 
 type Reason = NamingView['history'][number]['reason']
 type HistoryItem = {
@@ -45,7 +46,7 @@ type State = {
   /** Written before each rename so a crash mid-rename is reconciled on the next pass. */
   pending: (Change & { at: number }) | null
 }
-type Settings = Options & { enabled: boolean; aliasErrors: AliasError[] }
+type Settings = Options & { enabled: boolean; fallbackNames: boolean; aliasErrors: AliasError[] }
 
 /** Stops the running activation: its timer, its subscriptions and any rename still queued. */
 let stopCurrent: (() => void) | null = null
@@ -58,6 +59,8 @@ export default function activate(orca: OrcaWorkerApi): void {
   let queue: Promise<unknown> = Promise.resolve()
   let lastPlan: Plan = { auto: [], suggestions: [], locks: [], waiting: [] }
   let lastBar = ''
+  // Remember creation evidence even if it precedes the first successful list.
+  const created = new Map<string, { at: number; enabled: boolean }>()
   let view: NamingView = {
     status: 'starting',
     error: null,
@@ -85,6 +88,7 @@ export default function activate(orca: OrcaWorkerApi): void {
     return {
       enabled: raw.enabled !== false,
       standbyNames: raw.standbyNames === true,
+      fallbackNames: raw.fallbackNames !== false,
       standbyLabel: label || DEFAULT_STANDBY_LABEL,
       aliases,
       aliasErrors: errors
@@ -202,7 +206,7 @@ export default function activate(orca: OrcaWorkerApi): void {
     const stored = await loadState()
     const state: State = stored ?? {
       version: 2,
-      baseline: workspaces.map((w) => w.id),
+      baseline: workspaces.filter((w) => !created.get(w.id)?.enabled || !settings.enabled).map((w) => w.id),
       baselineComplete: !truncated,
       seen: {},
       gone: {},
@@ -219,6 +223,18 @@ export default function activate(orca: OrcaWorkerApi): void {
       }
       state.pending = null
       dirty = true
+    }
+
+    // A real creation event is stronger evidence than a truncated/startup snapshot.
+    for (const [id, event] of created) {
+      if (now - event.at >= AUTO_WINDOW_MS) { created.delete(id); continue }
+      if (!byId.has(id)) continue
+      if (!state.baseline.includes(id) && !(id in state.seen)) {
+        if (settings.enabled && event.enabled) state.seen[id] = event.at
+        else state.baseline.push(id)
+        dirty = true
+      }
+      created.delete(id)
     }
 
     const known = new Set([...state.baseline, ...Object.keys(state.seen)])
@@ -270,7 +286,13 @@ export default function activate(orca: OrcaWorkerApi): void {
       }
     }
 
-    lastPlan = planAll(workspaces, autoIds(state, now), state.records, settings, shortHash)
+    const eligible = autoIds(state, now)
+    lastPlan = planAll(workspaces, eligible, state.records, settings, shortHash)
+    if (settings.fallbackNames && !settings.standbyNames) {
+      const overdue = new Set(lastPlan.waiting.filter((id) => now - state.seen[id] >= TITLE_GRACE_MS))
+      const fallback = planAll(workspaces, overdue, state.records, { ...settings, standbyNames: true }, shortHash)
+      lastPlan.auto.push(...fallback.auto)
+    }
     for (const id of lastPlan.locks) {
       state.records[id] = { ...state.records[id], name: byId.get(id)?.name ?? '', locked: true, at: now }
       dirty = true
@@ -291,7 +313,8 @@ export default function activate(orca: OrcaWorkerApi): void {
       // Renamed ones no longer wait.
       lastPlan = { ...lastPlan, auto: [], waiting: lastPlan.waiting.filter((id) => !state.records[id]) }
     }
-    return publish(buildView(state, settings, notice ?? (failed ? { code: 'rename-failed', detail: failed } : null)))
+    const next = buildView(state, settings, notice ?? (failed ? { code: 'rename-failed', detail: failed } : null))
+    return publish(failed ? { ...next, status: 'error', error: failed } : next)
   }
 
   async function guardedPass(notice: NamingNotice | null = null): Promise<NamingView> {
@@ -390,7 +413,14 @@ export default function activate(orca: OrcaWorkerApi): void {
   orca.commands.register('naming.toggle', async () => describe(await serial(toggle)))
 
   const subscriptions: Disposable[] = [
-    orca.events.on('workspace.created', () => schedule(CREATED_DEBOUNCE_MS)),
+    orca.events.on('workspace.created', ({ workspaceId }) => {
+      const at = Date.now()
+      return serial(async () => {
+        const { enabled } = await readSettings()
+        created.set(workspaceId, { at, enabled })
+        schedule(CREATED_DEBOUNCE_MS)
+      })
+    }),
     orca.settings.onDidChange(() => schedule(CREATED_DEBOUNCE_MS))
   ]
   stopCurrent = () => {

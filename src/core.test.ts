@@ -182,3 +182,21 @@ test('a checkout in the project’s own folder is never renamed, whatever its br
   assert.equal(isProjectRoot(checkout), true)
   assert.deepEqual(plan([checkout]).auto, [])
 })
+
+test('same-directory folder sessions reported as branchless worktrees are not roots', () => {
+  const session = ws({ kind: 'worktree', path: '/Users/me/Projects/Mac', branch: null, name: '修复插件命名' })
+  assert.equal(isProjectRoot(session), false)
+  assert.equal(plan([session]).auto[0].after, 'Mac｜修复插件命名')
+  assert.equal(isProjectRoot({ ...session, name: 'Mac' }), true)
+})
+
+test('dashed folder workspace names supply topics without a Git branch', () => {
+  assert.equal(plan([ws({ name: 'naming-guard-fix' })]).auto[0].after, 'Mac｜Naming guard fix')
+})
+
+test('English and Chinese creation placeholders wait instead of becoming final topics', () => {
+  for (const name of ['New workspace', 'Untitled chat 2', '新建工作区', '未命名会话']) {
+    assert.deepEqual(plan([ws({ name })]).waiting, ['w1'])
+    assert.equal(plan([ws({ name })], { options: { ...options, standbyNames: true } }).auto[0].stage, 'standby')
+  }
+})
