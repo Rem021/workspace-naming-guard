@@ -51,7 +51,7 @@ test('shows status, activity and suggestions, and sends Undo and Apply to the wo
   assert.deepEqual(view.rowsOf({ label: 'Suggestions' }), ['old'])
   await view.press({ text: 'Apply all' })
   assert.deepEqual(calls, ['undo:h1', 'apply:old'])
-  assert.ok(view.find({ text: 'Every existing workspace already follows Project｜Topic.' }))
+  assert.ok(view.find({ text: 'No naming suggestions right now.' }))
 
   await view.toggle({ label: 'Rename new workspaces automatically' })
   assert.deepEqual(calls.at(-1), 'enabled:false')

@@ -155,7 +155,7 @@ test('aliases and standby names come from settings', async () => {
     await worker.request('naming.check')
     s.workspaces.push(ws('w', 'seagrass'))
     const view = await worker.request('naming.check')
-    assert.match(s.named('w') ?? '', /^Desk｜Standby [0-9a-f]{8}$/)
+    assert.match(s.named('w') ?? '', /^Desk｜待命工作区 [0-9a-f]{8}$/)
     assert.deepEqual(view.aliasErrors, [{ line: 2, text: 'bad line' }])
     assert.equal(view.counts.waiting, 0)
   } finally {
@@ -195,12 +195,12 @@ test('a failed rename is reported and retried, without stopping the worker', asy
     await worker.request('naming.check')
     s.workspaces.push(ws('w', 'Ship the release'))
     const view = await worker.request('naming.check')
-    assert.equal(view.status, 'active')
+    assert.equal(view.status, 'error')
     assert.deepEqual(view.notice, { code: 'rename-failed', detail: 'rate_limited' })
     assert.equal(s.named('w'), 'Ship the release')
     assert.equal(view.suggestions.length, 0)
     const status = await worker.command('naming.status')
-    assert.match(String(status), /Workspace Naming Guard is on/)
+    assert.match(String(status), /could not check names \(rate_limited\)/)
   } finally {
     await worker.deactivate()
   }
@@ -289,4 +289,101 @@ test('an undo cannot itself be undone', async () => {
   } finally {
     await worker.deactivate()
   }
+})
+
+function knownState(seen: Record<string, number>, baseline: string[] = []): Record<string, JsonValue> {
+  return { 'state-v2': { version: 2, baseline, baselineComplete: true, seen, gone: {}, records: {}, history: [], pending: null } }
+}
+
+test('untitled workspaces get a fallback after the grace period, including after restart', async () => {
+  const now = Date.now()
+  const s = sidebar([ws('late', 'blobfish'), ws('early', 'chiton'), ws('old', 'knifefish')], {
+    storage: knownState({ late: now - 61_000, early: now }, ['old'])
+  })
+  const worker = await mountWorker(main, { host: s.host })
+  try {
+    const view = await worker.request('naming.check')
+    assert.match(s.named('late') ?? '', /^Mac｜待命工作区 [0-9a-f]{8}$/)
+    assert.equal(s.named('early'), 'chiton')
+    assert.equal(s.named('old'), 'knifefish')
+    assert.equal(view.counts.waiting, 1)
+    assert.equal(view.history[0].reason, 'standby')
+    await worker.request('naming.check')
+    assert.equal(s.host.callsOf('workspace.rename').length, 1)
+  } finally { await worker.deactivate() }
+})
+
+test('a real title beats fallback; explicit opt-out and pause are respected', async () => {
+  for (const settings of [{}, { fallbackNames: false }, { enabled: false }] as Record<string, JsonValue>[]) {
+    const s = sidebar([ws('a', 'Fix login bug'), ws('b', 'New workspace')], {
+      settings, storage: knownState({ a: Date.now() - 61_000, b: Date.now() - 61_000 })
+    })
+    const worker = await mountWorker(main, { host: s.host })
+    try {
+      await worker.request('naming.check')
+      assert.equal(s.named('a'), settings.enabled === false ? 'Fix login bug' : 'Mac｜Fix login bug')
+      if (settings.enabled === false || settings.fallbackNames === false) assert.equal(s.named('b'), 'New workspace')
+      else assert.match(s.named('b') ?? '', /^Mac｜待命工作区 /)
+    } finally { await worker.deactivate() }
+  }
+})
+
+test('a creation event before the first list is not swallowed by the baseline', async () => {
+  const s = sidebar([])
+  const worker = await mountWorker(main, { host: s.host })
+  try {
+    await worker.emit('workspace.created', { workspaceId: 'new', kind: 'folder', path: '/Users/me/Mac/new', branch: '' })
+    s.workspaces.push(ws('new', 'Fix new workspace'), ws('old', 'Old project notes'))
+    const view = await worker.request('naming.check')
+    assert.equal(s.named('new'), 'Mac｜Fix new workspace')
+    assert.equal(s.named('old'), 'Old project notes')
+    assert.deepEqual(view.suggestions.map((x) => x.id), ['old'])
+  } finally { await worker.deactivate() }
+})
+
+test('creation evidence survives a truncated list and a delayed row', async () => {
+  let truncated = true
+  const s = sidebar([ws('old', 'Old project notes')], { truncated: () => truncated })
+  const worker = await mountWorker(main, { host: s.host })
+  try {
+    await worker.request('naming.check')
+    await worker.emit('workspace.created', { workspaceId: 'new', kind: 'folder', path: '/Users/me/Mac/new', branch: '' })
+    await worker.request('naming.check')
+    s.workspaces.push(ws('new', 'Fix new workspace'))
+    truncated = false
+    await worker.request('naming.check')
+    assert.equal(s.named('new'), 'Mac｜Fix new workspace')
+    assert.equal(s.named('old'), 'Old project notes')
+  } finally { await worker.deactivate() }
+})
+
+test('a creation event while paused cannot become automatic when its row appears after resume', async () => {
+  const s = sidebar([], { settings: { enabled: false } })
+  const worker = await mountWorker(main, { host: s.host })
+  try {
+    await worker.request('naming.check')
+    await worker.emit('workspace.created', { workspaceId: 'new', kind: 'folder', path: '/Users/me/Mac/new', branch: '' })
+    await worker.request('naming.setEnabled', { enabled: true })
+    s.workspaces.push(ws('new', 'Fix new workspace'))
+    const view = await worker.request('naming.check')
+    assert.equal(s.named('new'), 'Fix new workspace')
+    assert.deepEqual(view.suggestions.map((x) => x.id), ['new'])
+  } finally { await worker.deactivate() }
+})
+
+test('fallback keeps the six-hour boundary and respects a custom standby label and a subsequent rename', async () => {
+  const s = sidebar([ws('expired', 'blobfish'), ws('recent', 'chiton')], {
+    settings: { standbyLabel: 'Waiting' },
+    storage: knownState({ expired: Date.now() - 7 * 60 * 60_000, recent: Date.now() - 61_000 })
+  })
+  const worker = await mountWorker(main, { host: s.host })
+  try {
+    await worker.request('naming.check')
+    assert.equal(s.named('expired'), 'blobfish')
+    assert.match(s.named('recent') ?? '', /^Mac｜Waiting [0-9a-f]{8}$/)
+    s.workspaces[1].name = 'Personal notes'
+    const view = await worker.request('naming.check')
+    assert.equal(s.named('recent'), 'Personal notes')
+    assert.equal(view.counts.locked, 1)
+  } finally { await worker.deactivate() }
 })

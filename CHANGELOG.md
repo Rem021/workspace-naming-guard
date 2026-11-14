@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.1.1 (2026-11-14)
+
+- New untitled workspaces now receive a standby name after a 60-second title grace period by default. The `fallbackNames` setting can disable this; `standbyNames` still opts into immediate naming. The default standby label is `待命工作区` (saved custom labels are preserved).
+- Fix branchless folder-project sessions being mistaken for the project root because they share its directory. Meaningful dashed folder workspace names now supply a topic without a Git branch.
+- Treat English and Chinese creation placeholders as untitled, rather than final topics.
+- Preserve creation-event evidence through the first scan and truncated/delayed listings. Events observed while paused stay suggestion-only.
+- Show an error status when renaming fails, instead of a green success status. Keep retrying and preserve manual-rename, Undo and Ignore locks.
+- No new capabilities. Orca 1.4.258 still cannot supply native chat titles through the plugin API: fallback names are standby names, not chat summaries, and replace Orca's future AI workspace title.
+
 ## 1.1.0 (2026-11-14)
 
 A rewrite on Orca's official plugin API.
