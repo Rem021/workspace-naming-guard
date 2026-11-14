@@ -2,20 +2,23 @@
 // `workspace.rename` (Orca's plugin API, host API 1.5); it imports nothing from Node, and never
 // reads Orca's files, starts programs or uses the network. Orca transpiles this file when it
 // loads: no build step.
-import type { JsonValue, NamingView } from 'orca'
+import type { JsonValue, NamingNotice, NamingView } from 'orca'
 import type { Disposable, OrcaWorkerApi } from 'orca/worker'
-import { parseAliases, planAll, shortHash, type Change, type NameRecord, type Options, type Plan, type Workspace } from './core.ts'
+import { parseAliases, planAll, shortHash, type AliasError, type Change, type NameRecord, type Options, type Plan, type Workspace } from './core.ts'
 
 const STATE_KEY = 'state-v2'
 const ACTIVE_POLL_MS = 5_000
 const IDLE_POLL_MS = 15_000
 const CREATED_DEBOUNCE_MS = 400
-/** How long a new workspace is watched closely for Orca's agent title. */
-const WATCH_NEW_MS = 6 * 60 * 60_000
+/** How long after it first appears a new workspace may still be renamed on its own. */
+const AUTO_WINDOW_MS = 6 * 60 * 60_000
+/** How long a workspace may be missing from the list before the plugin forgets it. */
+const FORGET_AFTER_MS = 14 * 24 * 60 * 60_000
 const MAX_RENAMES_PER_PASS = 10
+const MAX_APPLY = 50
 const HISTORY_LIMIT = 200
 const DAY_MS = 24 * 60 * 60_000
-const DEFAULT_STANDBY_LABEL = '待命工作区'
+const DEFAULT_STANDBY_LABEL = 'Standby'
 
 type Reason = NamingView['history'][number]['reason']
 type HistoryItem = {
@@ -29,16 +32,20 @@ type HistoryItem = {
 }
 type State = {
   version: 2
-  /** Workspaces that existed when the plugin first ran: suggestions only, never automatic. */
+  /** Workspaces that existed before the plugin could watch them: suggestions only, never automatic. */
   baseline: string[]
-  /** When each newer workspace was first seen. */
+  /** False while the first list was truncated: the next complete list fills the baseline in. */
+  baselineComplete: boolean
+  /** When each newer workspace was first seen while the plugin was on. */
   seen: Record<string, number>
+  /** When a known workspace went missing from the list; forgotten after FORGET_AFTER_MS. */
+  gone: Record<string, number>
   records: Record<string, NameRecord>
   history: HistoryItem[]
   /** Written before each rename so a crash mid-rename is reconciled on the next pass. */
   pending: (Change & { at: number }) | null
 }
-type Settings = Options & { enabled: boolean; aliasErrors: string[] }
+type Settings = Options & { enabled: boolean; aliasErrors: AliasError[] }
 
 /** Stops the running activation: its timer, its subscriptions and any rename still queued. */
 let stopCurrent: (() => void) | null = null
@@ -47,6 +54,7 @@ export default function activate(orca: OrcaWorkerApi): void {
   stopCurrent?.()
   let stopped = false
   let timer: ReturnType<typeof setTimeout> | undefined
+  let dueAt = Infinity
   let queue: Promise<unknown> = Promise.resolve()
   let lastPlan: Plan = { auto: [], suggestions: [], locks: [], waiting: [] }
   let lastBar = ''
@@ -84,9 +92,18 @@ export default function activate(orca: OrcaWorkerApi): void {
   }
 
   async function loadState(): Promise<State | null> {
-    const raw = (await orca.storage.get(STATE_KEY)) as unknown as State | null
+    const raw = (await orca.storage.get(STATE_KEY)) as unknown as Partial<State> | null
     if (!raw || raw.version !== 2 || !Array.isArray(raw.baseline) || !Array.isArray(raw.history)) return null
-    return { ...raw, seen: raw.seen ?? {}, records: raw.records ?? {}, pending: raw.pending ?? null }
+    return {
+      version: 2,
+      baseline: raw.baseline,
+      baselineComplete: raw.baselineComplete !== false,
+      seen: raw.seen ?? {},
+      gone: raw.gone ?? {},
+      records: raw.records ?? {},
+      history: raw.history,
+      pending: raw.pending ?? null
+    }
   }
 
   const saveState = (state: State) => orca.storage.set(STATE_KEY, state as unknown as JsonValue)
@@ -94,6 +111,11 @@ export default function activate(orca: OrcaWorkerApi): void {
   async function listWorkspaces(): Promise<{ workspaces: Workspace[]; truncated: boolean }> {
     const result = await orca.host.call('workspace.list')
     return { workspaces: result.workspaces as Workspace[], truncated: result.truncated }
+  }
+
+  /** Workspaces the plugin may still rename on its own: first seen recently, while it was on. */
+  function autoIds(state: State, now: number): Set<string> {
+    return new Set(Object.keys(state.seen).filter((id) => now - state.seen[id] < AUTO_WINDOW_MS))
   }
 
   async function rename(state: State, change: Change, record: Partial<NameRecord> = {}): Promise<string> {
@@ -113,7 +135,8 @@ export default function activate(orca: OrcaWorkerApi): void {
         at
       })
       state.history = state.history.slice(-HISTORY_LIMIT)
-      orca.log(`renamed "${change.before}" -> "${actual}" (${change.reason})`)
+      // Names come from people's prompts: keep them out of the log.
+      orca.log(`renamed a workspace (${change.reason})`)
       return actual
     } finally {
       state.pending = null
@@ -121,13 +144,12 @@ export default function activate(orca: OrcaWorkerApi): void {
     }
   }
 
-  function buildView(state: State, settings: Settings, status: NamingView['status'], error: string | null, notice: string | null): NamingView {
+  function buildView(state: State, settings: Settings, notice: NamingNotice | null): NamingView {
     const now = Date.now()
     const records = Object.values(state.records)
-    const waiting = lastPlan.waiting.filter((id) => now - (state.seen[id] ?? 0) < WATCH_NEW_MS).length
     return {
-      status,
-      error,
+      status: settings.enabled ? 'active' : 'paused',
+      error: null,
       checkedAt: now,
       enabled: settings.enabled,
       standbyNames: settings.standbyNames,
@@ -135,7 +157,7 @@ export default function activate(orca: OrcaWorkerApi): void {
       counts: {
         managed: records.filter((r) => !r.locked).length,
         locked: records.filter((r) => r.locked).length,
-        waiting,
+        waiting: lastPlan.waiting.length,
         renamedToday: state.history.filter((h) => h.reason !== 'undo' && !h.undone && now - h.at < DAY_MS).length
       },
       suggestions: lastPlan.suggestions.slice(0, 200).map((c) => ({ id: c.id, current: c.before, proposed: c.after, reason: c.reason })),
@@ -168,8 +190,8 @@ export default function activate(orca: OrcaWorkerApi): void {
     return view
   }
 
-  /** One pass: list, plan, rename new workspaces, publish. */
-  async function pass(notice: string | null = null): Promise<NamingView> {
+  /** One pass: list, update what the plugin knows, plan, rename new workspaces, publish. */
+  async function pass(notice: NamingNotice | null = null): Promise<NamingView> {
     const settings = await readSettings()
     if (!orca.host.has('workspace.list') || !orca.host.has('workspace.rename')) {
       return publish({ ...view, status: 'unsupported', error: null, checkedAt: Date.now(), notice })
@@ -181,7 +203,9 @@ export default function activate(orca: OrcaWorkerApi): void {
     const state: State = stored ?? {
       version: 2,
       baseline: workspaces.map((w) => w.id),
+      baselineComplete: !truncated,
       seen: {},
+      gone: {},
       records: {},
       history: [],
       pending: null
@@ -197,26 +221,56 @@ export default function activate(orca: OrcaWorkerApi): void {
       dirty = true
     }
 
+    const known = new Set([...state.baseline, ...Object.keys(state.seen)])
+    if (!state.baselineComplete && !truncated) {
+      // The first list was cut short: whatever it missed existed before the plugin, too.
+      for (const ws of workspaces) {
+        if (known.has(ws.id)) continue
+        state.baseline.push(ws.id)
+        known.add(ws.id)
+      }
+      state.baselineComplete = true
+      dirty = true
+    }
     for (const ws of workspaces) {
-      if (state.baseline.includes(ws.id) || ws.id in state.seen) continue
-      // A truncated list (over 500 workspaces) cannot tell new from unlisted: treat it as old.
-      if (truncated) state.baseline.push(ws.id)
+      if (known.has(ws.id)) continue
+      // Only a workspace that appears while the plugin is on, in a complete list, is "new".
+      if (truncated || !settings.enabled) state.baseline.push(ws.id)
       else state.seen[ws.id] = now
       dirty = true
     }
-    const baseline = new Set(state.baseline)
+    if (!settings.enabled) {
+      // Paused: anything not yet named becomes a suggestion, so a name typed meanwhile is safe.
+      for (const id of Object.keys(state.seen)) {
+        if (state.records[id]) continue
+        delete state.seen[id]
+        state.baseline.push(id)
+        dirty = true
+      }
+    }
     if (!truncated) {
-      // Forget workspaces that are gone, so state does not grow forever.
-      for (const bucket of [state.seen, state.records]) {
-        for (const id of Object.keys(bucket)) {
-          if (byId.has(id)) continue
-          delete bucket[id]
-          dirty = true
+      // A workspace can drop out of one list (a host offline, Orca starting): forget it only
+      // after it has been missing for a long time, so its lock survives.
+      for (const id of new Set([...state.baseline, ...Object.keys(state.seen), ...Object.keys(state.records)])) {
+        if (byId.has(id)) {
+          if (id in state.gone) {
+            delete state.gone[id]
+            dirty = true
+          }
+          continue
         }
+        const since = (state.gone[id] ??= now)
+        if (since === now) dirty = true
+        if (now - since < FORGET_AFTER_MS) continue
+        delete state.gone[id]
+        delete state.seen[id]
+        delete state.records[id]
+        state.baseline = state.baseline.filter((b) => b !== id)
+        dirty = true
       }
     }
 
-    lastPlan = planAll(workspaces, baseline, state.records, settings, shortHash)
+    lastPlan = planAll(workspaces, autoIds(state, now), state.records, settings, shortHash)
     for (const id of lastPlan.locks) {
       state.records[id] = { ...state.records[id], name: byId.get(id)?.name ?? '', locked: true, at: now }
       dirty = true
@@ -231,17 +285,16 @@ export default function activate(orca: OrcaWorkerApi): void {
           await rename(state, change)
         } catch (e) {
           failed = errorCode(e)
-          orca.log(`rename failed for "${change.before}": ${failed}`)
+          orca.log(`a rename failed: ${failed}`)
         }
       }
       // Renamed ones no longer wait.
       lastPlan = { ...lastPlan, auto: [], waiting: lastPlan.waiting.filter((id) => !state.records[id]) }
     }
-    const status = settings.enabled ? 'active' : 'paused'
-    return publish(buildView(state, settings, status, null, notice ?? (failed ? `A rename failed (${failed}); it is retried on the next check.` : null)))
+    return publish(buildView(state, settings, notice ?? (failed ? { code: 'rename-failed', detail: failed } : null)))
   }
 
-  async function guardedPass(notice: string | null = null): Promise<NamingView> {
+  async function guardedPass(notice: NamingNotice | null = null): Promise<NamingView> {
     try {
       return await pass(notice)
     } catch (e) {
@@ -251,10 +304,16 @@ export default function activate(orca: OrcaWorkerApi): void {
     }
   }
 
+  /** Runs a pass after `delay`, unless one is already due sooner. */
   function schedule(delay: number): void {
     if (stopped) return
+    const due = Date.now() + delay
+    if (timer !== undefined && dueAt <= due) return
     clearTimeout(timer)
+    dueAt = due
     timer = setTimeout(() => {
+      timer = undefined
+      dueAt = Infinity
       void serial(() => guardedPass()).then((v) => schedule(v.counts.waiting > 0 ? ACTIVE_POLL_MS : IDLE_POLL_MS))
     }, delay)
   }
@@ -266,13 +325,23 @@ export default function activate(orca: OrcaWorkerApi): void {
     if (!state) return guardedPass()
     const { workspaces } = await listWorkspaces()
     const byId = new Map(workspaces.map((w) => [w.id, w]))
-    const wanted = new Set(ids)
-    let notice: string | null = null
+    const wanted = new Set(ids.slice(0, MAX_APPLY))
+    let notice: NamingNotice | null = null
     if (mode === 'apply') {
-      const fresh = planAll(workspaces, new Set(state.baseline), state.records, settings, shortHash)
+      const fresh = planAll(workspaces, autoIds(state, Date.now()), state.records, settings, shortHash)
       const changes = fresh.suggestions.filter((c) => wanted.has(c.id))
-      if (changes.length < wanted.size) notice = 'Some suggestions changed since they were shown; check them again.'
-      for (const change of changes) await rename(state, change)
+      let failed = 0
+      let lastError = ''
+      for (const change of changes) {
+        try {
+          await rename(state, change)
+        } catch (e) {
+          failed++
+          lastError = errorCode(e)
+        }
+      }
+      if (failed) notice = { code: 'apply-failed', detail: `${failed}/${changes.length} · ${lastError}` }
+      else if (changes.length < wanted.size) notice = { code: 'stale' }
     } else {
       const now = Date.now()
       for (const id of wanted) {
@@ -287,15 +356,21 @@ export default function activate(orca: OrcaWorkerApi): void {
   async function undo(key: string): Promise<NamingView> {
     const state = await loadState()
     const item = state?.history.find((h) => h.key === key)
-    if (!state || !item || item.undone) return pass('That rename was already undone.')
+    if (!state || !item || item.undone || item.reason === 'undo') return pass({ code: 'already-undone' })
     const { workspaces } = await listWorkspaces()
     const ws = workspaces.find((w) => w.id === item.id)
-    if (!ws) return pass('That workspace no longer exists.')
-    if (ws.name !== item.after) return pass(`Not undone: the workspace was renamed to "${ws.name}" since.`)
+    if (!ws) return pass({ code: 'gone' })
+    if (ws.name !== item.after) return pass({ code: 'renamed-since', detail: ws.name })
     await rename(state, { id: item.id, before: item.after, after: item.before, reason: 'undo', stage: 'final' }, { locked: true })
     item.undone = true
     await saveState(state)
     return pass()
+  }
+
+  async function toggle(): Promise<NamingView> {
+    const { enabled } = await readSettings()
+    await orca.settings.set('enabled', !enabled)
+    return guardedPass()
   }
 
   orca.panels.handle('naming.view', () => (view.status === 'starting' ? serial(() => guardedPass()) : view))
@@ -303,17 +378,16 @@ export default function activate(orca: OrcaWorkerApi): void {
   orca.panels.handle('naming.apply', ({ ids }) => serial(() => act(ids, 'apply')))
   orca.panels.handle('naming.ignore', ({ ids }) => serial(() => act(ids, 'ignore')))
   orca.panels.handle('naming.undo', ({ key }) => serial(() => undo(key)))
-  orca.panels.handle('naming.setEnabled', async ({ enabled }) => {
-    await orca.settings.set('enabled', enabled)
-    return serial(() => guardedPass())
-  })
+  orca.panels.handle('naming.setEnabled', ({ enabled }) =>
+    serial(async () => {
+      await orca.settings.set('enabled', enabled)
+      return guardedPass()
+    })
+  )
 
   orca.commands.register('naming.status', async () => describe(await serial(() => guardedPass())))
   orca.commands.register('naming.check', async () => describe(await serial(() => guardedPass())))
-  orca.commands.register('naming.toggle', async () => {
-    await orca.settings.set('enabled', !view.enabled)
-    return describe(await serial(() => guardedPass()))
-  })
+  orca.commands.register('naming.toggle', async () => describe(await serial(toggle)))
 
   const subscriptions: Disposable[] = [
     orca.events.on('workspace.created', () => schedule(CREATED_DEBOUNCE_MS)),
@@ -351,4 +425,3 @@ function describe(view: NamingView): string {
     }
   }
 }
-

@@ -21,6 +21,8 @@ import {
   Table,
   Tabs,
   Text,
+  update,
+  type NamingNotice,
   type NamingView,
   type PanelContext
 } from 'orca'
@@ -31,6 +33,16 @@ const EN = {
   auto: 'Rename new workspaces automatically',
   unsupported: 'This Orca cannot rename workspaces from plugins. Update to Orca 1.4.256 or later.',
   error: 'Could not read workspace names',
+  actionFailed: 'That did not work',
+  line: (n: number) => `line ${n}`,
+  notice: {
+    'rename-failed': (d?: string) => `A rename failed (${d}); it is tried again on the next check.`,
+    'apply-failed': (d?: string) => `Some suggestions could not be applied (${d}).`,
+    stale: () => 'Some suggestions changed since they were shown; check them again.',
+    'already-undone': () => 'That rename was already undone.',
+    gone: () => 'That workspace no longer exists.',
+    'renamed-since': (d?: string) => `Not undone: the workspace was renamed to "${d}" since.`
+  },
   aliasErrors: 'Some alias lines were skipped',
   aliasHint: 'Write each alias as "Repo name = Prefix" in Settings → Plugins → Workspace Naming Guard.',
   checked: 'Checked',
@@ -62,9 +74,9 @@ const EN = {
     '2. A worktree whose branch already says what it is for (`feature/login-page`) is named from the branch.',
     '3. Generic or wrong prefixes (`Agent｜…`, another project’s name, an alias) are replaced with the project’s own.',
     '',
-    '**Workspaces that existed before** are never renamed on their own: they show up under Suggestions.',
+    '**Older workspaces** (from before the plugin ran, or first seen more than 6 hours ago) are never renamed on their own: they show up under Suggestions.',
     '',
-    '**Your names win.** Rename a workspace yourself, press Undo or Ignore, and Naming Guard leaves it alone from then on.',
+    '**Your renames are final.** After Naming Guard has named a workspace, rename it yourself (or press Undo or Ignore) and it is left alone from then on. A name typed when creating a workspace is treated like Orca’s title and gets the prefix once; while paused, nothing is renamed and new workspaces only get suggestions.',
     '',
     'It uses only Orca’s plugin API: no files, no programs, no network.'
   ].join('\n')
@@ -76,6 +88,16 @@ const ZH: typeof EN = {
   auto: '自动命名新工作区',
   unsupported: '当前 Orca 版本不支持插件重命名工作区，请更新到 1.4.256 或更高版本。',
   error: '无法读取工作区名称',
+  actionFailed: '操作未完成',
+  line: (n: number) => `第 ${n} 行`,
+  notice: {
+    'rename-failed': (d?: string) => `有一次重命名失败（${d}），下次检查时会重试。`,
+    'apply-failed': (d?: string) => `部分建议未能应用（${d}）。`,
+    stale: () => '部分建议在显示后已变化，请重新检查。',
+    'already-undone': () => '这次重命名已经撤销过了。',
+    gone: () => '该工作区已不存在。',
+    'renamed-since': (d?: string) => `未撤销：该工作区之后已被改名为“${d}”。`
+  },
   aliasErrors: '部分别名行已跳过',
   aliasHint: '别名格式为“仓库名 = 前缀”，在 设置 → 插件 → Workspace Naming Guard 中填写。',
   checked: '上次检查',
@@ -107,9 +129,9 @@ const ZH: typeof EN = {
     '2. 分支名本身已说明用途的工作树（如 `feature/login-page`）直接按分支命名。',
     '3. 通用或错误的前缀（`Agent｜…`、其他项目名、别名）会换成本项目前缀。',
     '',
-    '**安装前已有的工作区**不会被自动改名，只出现在“建议”里。',
+    '**较早的工作区**（插件运行前已有，或首次出现已超过 6 小时）不会被自动改名，只出现在“建议”里。',
     '',
-    '**以你的命名为准。**手动改名、点“撤销”或“忽略”之后，命名守卫不再改动该工作区。',
+    '**你的改名是最终的。**命名守卫命名过的工作区，你手动改名（或点“撤销”“忽略”）后就不再改动。创建时手填的名字会像 Orca 标题一样补一次前缀；暂停期间不改任何名字，新工作区只出现在“建议”里。',
     '',
     '只使用 Orca 插件 API：不读文件、不运行程序、不联网。'
   ].join('\n')
@@ -122,20 +144,21 @@ const strings = () => (env.locale.toLowerCase().startsWith('zh') ? ZH : EN)
 const view = atom<NamingView | null>(null)
 /** A failed request's error code, shown until the next answer. */
 const failure = atom<string | null>(null)
-const busy = atom(false)
+/** Requests still in flight; controls are disabled while any is. */
+const busy = atom(0)
 const pickedSuggestions = atom<string[]>([])
 const pickedHistory = atom<string[]>([])
 const tab = atom('tab', 'activity', { persist: 'plugin' })
 
 async function send(task: () => Promise<NamingView>): Promise<void> {
-  set(busy, true)
+  update(busy, (n) => n + 1)
   try {
     set(view, await task())
     set(failure, null)
   } catch (e) {
     set(failure, (e as { code?: string }).code ?? 'action_failed')
   } finally {
-    set(busy, false)
+    update(busy, (n) => n - 1)
   }
 }
 
@@ -143,7 +166,8 @@ const check = () => send(() => plugin.request('naming.check'))
 const setEnabled = (enabled: boolean) => send(() => plugin.request('naming.setEnabled', { enabled }))
 const apply = (ids: string[]) => {
   set(pickedSuggestions, [])
-  return send(() => plugin.request('naming.apply', { ids }))
+  // A long list of renames can outlast the default 30 s.
+  return send(() => plugin.request('naming.apply', { ids }, { timeoutMs: 120_000 }))
 }
 const ignore = (ids: string[]) => {
   set(pickedSuggestions, [])
@@ -155,8 +179,18 @@ const undo = (key: string) => {
 }
 
 export function setup(ctx: PanelContext): void {
-  ctx.subscriptions.push(plugin.on('naming.changed', (next) => set(view, next)))
+  ctx.subscriptions.push(
+    plugin.on('naming.changed', (next) => {
+      set(view, next)
+      set(failure, null)
+    })
+  )
   void send(() => plugin.request('naming.view'))
+}
+
+function noticeText(t: typeof EN, notice: NamingNotice): string {
+  const word = t.notice[notice.code]
+  return word ? word(notice.detail) : notice.code
 }
 
 const STATUS_TONE = { starting: 'neutral', active: 'success', paused: 'neutral', unsupported: 'warning', error: 'danger' } as const
@@ -164,7 +198,7 @@ const STATUS_TONE = { starting: 'neutral', active: 'success', paused: 'neutral',
 export default function Panel() {
   const t = strings()
   const v = read(view)
-  const isBusy = read(busy)
+  const isBusy = read(busy) > 0
   const error = read(failure)
   if (!v) {
     return (
@@ -195,17 +229,21 @@ export default function Panel() {
       />
 
       {v.status === 'unsupported' ? <Callout tone="warning">{t.unsupported}</Callout> : null}
-      {v.status === 'error' || error ? (
+      {error ? (
+        <Callout tone="danger" title={t.actionFailed}>
+          {error}
+        </Callout>
+      ) : v.status === 'error' ? (
         <Callout tone="danger" title={t.error}>
-          {error ?? v.error}
+          {v.error}
         </Callout>
       ) : null}
       {v.aliasErrors.length ? (
         <Callout tone="warning" title={t.aliasErrors}>
-          {v.aliasErrors.join('; ')}. {t.aliasHint}
+          {v.aliasErrors.map((e) => `${t.line(e.line)}: ${e.text}`).join('; ')}. {t.aliasHint}
         </Callout>
       ) : null}
-      {v.notice ? <Callout tone="accent">{v.notice}</Callout> : null}
+      {v.notice ? <Callout tone="accent">{noticeText(t, v.notice)}</Callout> : null}
 
       <Row justify="between">
         <Text muted size="xs">

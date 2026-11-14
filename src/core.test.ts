@@ -20,13 +20,20 @@ const ws = (over: Partial<Workspace>): Workspace => ({
   kind: 'folder',
   name: 'blobfish',
   project: 'Mac',
-  path: '/Users/me/Mac',
+  path: '/Users/me/worktrees/w1',
   branch: null,
   hostId: 'local',
   ...over
 })
+/** Plans with every workspace auto-renameable except those in `baseline`. */
 const plan = (list: Workspace[], opts: Partial<{ baseline: string[]; records: Record<string, NameRecord>; options: Options }> = {}) =>
-  planAll(list, new Set(opts.baseline ?? []), opts.records ?? {}, opts.options ?? options, suffix)
+  planAll(
+    list,
+    new Set(list.map((w) => w.id).filter((id) => !(opts.baseline ?? []).includes(id))),
+    opts.records ?? {},
+    opts.options ?? options,
+    suffix
+  )
 
 test('normalize spaces Han and Latin text and tightens the separator', () => {
   assert.equal(normalize('  Mac | 相机Pro任务  '), 'Mac｜相机 Pro 任务')
@@ -35,9 +42,13 @@ test('normalize spaces Han and Latin text and tightens the separator', () => {
 
 test('aliases parse one per line and report bad lines', () => {
   const { aliases, errors } = parseAliases('# comment\nmy-api-v2 = API\n\nbroken line\nFCP调色 = FCP 调色\nx = a｜b')
-  assert.deepEqual(aliases, { 'my-api-v2': 'API', 'FCP调色': 'FCP 调色' })
-  assert.deepEqual(errors, ['line 4: broken line', 'line 6: x = a｜b'])
-  assert.deepEqual(parseAliases(undefined), { aliases: {}, errors: [] })
+  assert.deepEqual({ ...aliases }, { 'my-api-v2': 'API', 'FCP调色': 'FCP 调色' })
+  assert.deepEqual(errors, [
+    { line: 4, text: 'broken line' },
+    { line: 6, text: 'x = a｜b' }
+  ])
+  const empty = parseAliases(undefined)
+  assert.deepEqual([{ ...empty.aliases }, empty.errors], [{}, []])
 })
 
 test('project prefix uses the alias, else the head of the project name', () => {
@@ -114,7 +125,8 @@ test('standby names are opt-in and only for new workspaces', () => {
     records: { w1: { name: 'Mac｜待命工作区 ff348d15', stage: 'standby', at: 1 } }
   })
   assert.deepEqual(standby.auto, [])
-  assert.deepEqual(standby.waiting, ['w1'])
+  // A standby name replaced Orca's title, so nothing is waited for.
+  assert.deepEqual(standby.waiting, [])
 })
 
 test('workspaces from before the plugin started only get suggestions', () => {
@@ -145,4 +157,28 @@ test('standby ids are stable 8-digit hex', () => {
   assert.equal(shortHash('w1'), shortHash('w1'))
   assert.match(shortHash('identity:wt2:local:5768dc78'), /^[0-9a-f]{8}$/)
   assert.notEqual(shortHash('a'), shortHash('b'))
+})
+
+test('a half-width bar reads like the full-width one', () => {
+  const result = plan([ws({ id: 'a', name: 'Agent | Fix flaky tests' }), ws({ id: 'b', name: 'API | Token refresh' })])
+  assert.deepEqual(result.auto.map((c) => [c.id, c.after]), [['a', 'Mac｜Fix flaky tests']])
+})
+
+test('inherited object keys are never read as aliases or records', () => {
+  assert.equal(projectPrefix('constructor', {}), 'constructor')
+  assert.equal(projectPrefix('toString', parseAliases('').aliases), 'toString')
+  const result = plan([ws({ name: 'constructor｜Some topic here', project: 'Mac' }), ws({ id: 'toString', name: 'blobfish' })])
+  assert.deepEqual([result.auto, result.locks], [[], []])
+})
+
+test('titles in other scripts are named too', () => {
+  assert.equal(plan([ws({ name: 'Исправить обновление токена' })]).auto[0].after, 'Mac｜Исправить обновление токена')
+  assert.equal(plan([ws({ name: '토큰갱신수정' })]).auto[0].after, 'Mac｜토큰갱신수정')
+  assert.deepEqual(plan([ws({ name: 'Исправить' })]).auto, [])
+})
+
+test('a checkout in the project’s own folder is never renamed, whatever its branch', () => {
+  const checkout = ws({ kind: 'worktree', name: 'feature/login-page', branch: 'feature/login-page', path: '/Users/me/Projects/Mac' })
+  assert.equal(isProjectRoot(checkout), true)
+  assert.deepEqual(plan([checkout]).auto, [])
 })

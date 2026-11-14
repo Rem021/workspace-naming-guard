@@ -52,18 +52,19 @@ export type Plan = {
   waiting: string[]
 }
 
-const HAN = /[㐀-鿿豈-﫿]/
+/** Scripts written without spaces between words: one run is already a readable topic. */
+const WIDE = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u
 const GENERIC_HEADS = new Set(['agent', 'ai', 'assistant', 'chat', 'workspace', 'task', 'orca', '工作区', '项目', '任务'])
 const DEFAULT_BRANCHES = new Set(['main', 'master', 'trunk', 'develop', 'dev'])
 const POLITE_LEAD = /^(?:请问|请帮我|请你|帮我|麻烦你|麻烦|我想要|我想|我要|我们需要|能不能|可以帮我|please\s+help\s+me\s+(?:to\s+)?|please\s+|can\s+you\s+|could\s+you\s+|help\s+me\s+(?:to\s+)?|let'?s\s+)/iu
 
-/** Trims, joins `｜` tightly and puts one space between Han characters and Latin letters or digits. */
+/** Trims, joins `｜` (or `|`) tightly and puts one space between Han characters and Latin letters or digits. */
 export function normalize(value: string): string {
   return value
     .trim()
     .replace(/\s*[｜|]\s*/g, SEP)
-    .replace(/([㐀-鿿豈-﫿])([A-Za-z0-9])/g, '$1 $2')
-    .replace(/([A-Za-z0-9])([㐀-鿿豈-﫿])/g, '$1 $2')
+    .replace(/([\u3400-\u9fff\uf900-\ufaff])([A-Za-z0-9])/g, '$1 $2')
+    .replace(/([A-Za-z0-9])([\u3400-\u9fff\uf900-\ufaff])/g, '$1 $2')
     .replace(/\s+/g, ' ')
 }
 
@@ -71,9 +72,11 @@ export function normalize(value: string): string {
  * Parses the `aliases` setting: one `Raw name = Prefix` per line; blank lines and `#` comments are
  * skipped. Bad lines come back in `errors` (1-based line numbers) so the panel can show them.
  */
-export function parseAliases(text: unknown): { aliases: Record<string, string>; errors: string[] } {
-  const aliases: Record<string, string> = {}
-  const errors: string[] = []
+export type AliasError = { line: number; text: string }
+
+export function parseAliases(text: unknown): { aliases: Record<string, string>; errors: AliasError[] } {
+  const aliases: Record<string, string> = Object.create(null)
+  const errors: AliasError[] = []
   if (typeof text !== 'string') return { aliases, errors }
   text.split(/\r?\n/).forEach((raw, index) => {
     const line = raw.trim()
@@ -82,7 +85,7 @@ export function parseAliases(text: unknown): { aliases: Record<string, string>; 
     const from = at > 0 ? line.slice(0, at).trim() : ''
     const to = at > 0 ? normalize(line.slice(at + 1)) : ''
     if (!from || !to || to.includes(SEP)) {
-      errors.push(`line ${index + 1}: ${line.slice(0, 60)}`)
+      errors.push({ line: index + 1, text: line.slice(0, 60) })
       return
     }
     aliases[from] = to
@@ -90,25 +93,30 @@ export function parseAliases(text: unknown): { aliases: Record<string, string>; 
   return { aliases, errors }
 }
 
+/** The alias for `name`, ignoring inherited keys such as `constructor`. */
+function aliasOf(aliases: Record<string, string>, name: string): string | undefined {
+  return Object.hasOwn(aliases, name) ? aliases[name] : undefined
+}
+
 /** The prefix for a project: its alias when one is set, else its own name, normalized. */
 export function projectPrefix(project: string, aliases: Record<string, string>): string {
-  const raw = project.trim()
+  const raw = normalize(project)
   const head = raw.includes(SEP) ? raw.slice(0, raw.indexOf(SEP)).trim() : raw
-  return aliases[raw] ?? aliases[head] ?? aliases[normalize(head)] ?? normalize(head)
+  return aliasOf(aliases, project.trim()) ?? aliasOf(aliases, raw) ?? aliasOf(aliases, head) ?? head
 }
 
 /** A slug such as `blobfish`, `codex/mojarra` or `main`: one token, nothing a person would read as a topic. */
 export function isSlug(name: string): boolean {
   const s = name.trim()
-  return !s || (!HAN.test(s) && !/\s/.test(s))
+  return !s || (!WIDE.test(s) && !/\s/.test(s))
 }
 
-/** Text worth using as a topic: some Han text, or at least two Latin words. */
+/** Text worth using as a topic: Chinese, Japanese or Korean text, or at least two words in any script. */
 export function isMeaningfulTopic(text: string): boolean {
   const s = text.trim()
   if (!s || /^(?:new|untitled)(?:\s+(?:chat|session|workspace))?$/i.test(s)) return false
-  if (HAN.test(s)) return true
-  return /[A-Za-z0-9]{2,}[^A-Za-z0-9]+[A-Za-z0-9]{2,}/.test(s)
+  if (WIDE.test(s)) return true
+  return /[\p{L}\p{N}]{2,}[^\p{L}\p{N}]+[\p{L}\p{N}]{2,}/u.test(s)
 }
 
 /** Orca's own `humanizeBranchSlug`: `fix-auth-token` -> `Fix auth token`. */
@@ -142,26 +150,14 @@ export function cleanTopic(title: string): string {
     .replace(/[，,、？?！!。；;：:｜|]+/gu, ' ')
     .replace(/\s+/g, ' ')
     .trim()
-  const max = HAN.test(topic) ? 24 : 40
+  const max = WIDE.test(topic) ? 24 : 40
   if (topic.length > max) {
     topic = topic.slice(0, max)
-    // Cut Latin text at a word boundary instead of mid-word.
-    if (!HAN.test(topic) && topic.includes(' ')) topic = topic.slice(0, topic.lastIndexOf(' '))
+    // Cut spaced text at a word boundary instead of mid-word.
+    if (!WIDE.test(topic) && topic.includes(' ')) topic = topic.slice(0, topic.lastIndexOf(' '))
     topic = topic.trim()
   }
   return isMeaningfulTopic(topic) ? normalize(topic) : ''
-}
-
-/** `Prefix｜Topic` with a prefix this Orca knows and a meaningful, single-line topic. */
-export function isFormalName(name: string, prefixes: ReadonlySet<string>): boolean {
-  const parts = name.split(SEP)
-  return (
-    parts.length === 2 &&
-    name.length <= 80 &&
-    !/[\x00-\x1f]/.test(name) &&
-    prefixes.has(parts[0]) &&
-    isMeaningfulTopic(parts[1])
-  )
 }
 
 export function isStandbyName(name: string, label: string): boolean {
@@ -173,12 +169,18 @@ export function standbyName(prefix: string, label: string, suffix: string): stri
   return `${prefix}${SEP}${label} ${suffix}`
 }
 
-/** The project's own checkout or root folder: never renamed. */
+/**
+ * The project's own checkout or root folder: never renamed. That is a worktree on a default
+ * branch, a worktree in a folder named after the project, or a workspace named after it.
+ */
 export function isProjectRoot(ws: Workspace): boolean {
-  if (ws.kind === 'worktree' && ws.branch && DEFAULT_BRANCHES.has(ws.branch.replace(/^refs\/heads\//, ''))) {
-    return true
+  const project = normalize(ws.project ?? '').toLowerCase()
+  if (ws.kind === 'worktree') {
+    if (ws.branch && DEFAULT_BRANCHES.has(ws.branch.replace(/^refs\/heads\//, ''))) return true
+    const folder = ws.path.replace(/[\\/]+$/, '').split(/[\\/]/).pop() ?? ''
+    if (project && normalize(folder).toLowerCase() === project) return true
   }
-  return Boolean(ws.project) && normalize(ws.name).toLowerCase() === normalize(ws.project ?? '').toLowerCase()
+  return Boolean(project) && normalize(ws.name).toLowerCase() === project
 }
 
 /**
@@ -193,7 +195,8 @@ export function proposeName(
   standbySuffix: string,
   allowStandby: boolean
 ): Omit<Change, 'id' | 'before'> | null {
-  const name = ws.name.trim()
+  // Normalized first, so `Agent | Fix tests` is read like `Agent｜Fix tests`.
+  const name = normalize(ws.name)
 
   if (name.includes(SEP)) {
     if (isStandbyName(name, options.standbyLabel)) return null
@@ -204,7 +207,7 @@ export function proposeName(
     // it is kept word for word.
     const replaceable =
       GENERIC_HEADS.has(cleanHead.toLowerCase()) ||
-      cleanHead in options.aliases ||
+      aliasOf(options.aliases, cleanHead) !== undefined ||
       (prefixes.has(cleanHead) && cleanHead !== prefix)
     if (!replaceable) return null
     const topic = normalize(rest.join(' '))
@@ -218,7 +221,7 @@ export function proposeName(
   }
 
   const fromBranch = ws.kind === 'worktree' ? cleanTopic(topicFromBranch(ws.branch)) : ''
-  if (fromBranch && (name === ws.branch || isSlug(name))) {
+  if (fromBranch && isSlug(name)) {
     return { after: `${prefix}${SEP}${fromBranch}`, reason: 'branch', stage: 'final' }
   }
 
@@ -230,25 +233,26 @@ export function proposeName(
 
 /**
  * Plans one pass over every workspace.
- * - `baseline`: ids that existed before the plugin first ran; they only get suggestions.
+ * - `autoIds`: workspaces the plugin may rename on its own (new ones, first seen recently while
+ *   it was on); every other workspace only gets suggestions.
  * - `records`: what the plugin named; a record whose name no longer matches means a person
  *   renamed it, so the workspace is locked and left alone from then on.
  * - `suffixOf`: a short stable id for standby names (the worker passes a hash of the id).
  */
 export function planAll(
   workspaces: readonly Workspace[],
-  baseline: ReadonlySet<string>,
+  autoIds: ReadonlySet<string>,
   records: Readonly<Record<string, NameRecord>>,
   options: Options,
   suffixOf: (id: string) => string
 ): Plan {
   const plan: Plan = { auto: [], suggestions: [], locks: [], waiting: [] }
-  const prefixes = new Set<string>(Object.values(options.aliases))
+  const prefixes = new Set<string>(Object.keys(options.aliases).map((k) => options.aliases[k]))
   for (const ws of workspaces) if (ws.project) prefixes.add(projectPrefix(ws.project, options.aliases))
 
   for (const ws of workspaces) {
     if (!ws.project || isProjectRoot(ws)) continue
-    const record = records[ws.id]
+    const record = Object.hasOwn(records, ws.id) ? records[ws.id] : undefined
     if (record?.locked) continue
     if (record && record.name !== ws.name) {
       plan.locks.push(ws.id)
@@ -258,13 +262,14 @@ export function planAll(
     if (record?.stage === 'final') continue
 
     const prefix = projectPrefix(ws.project, options.aliases)
-    const isNew = !baseline.has(ws.id)
-    const proposal = proposeName(ws, prefix, prefixes, options, suffixOf(ws.id), isNew)
+    const auto = autoIds.has(ws.id)
+    const proposal = proposeName(ws, prefix, prefixes, options, suffixOf(ws.id), auto)
     if (proposal && proposal.after !== ws.name) {
       const change: Change = { id: ws.id, before: ws.name, ...proposal }
-      if (isNew) plan.auto.push(change)
+      if (auto) plan.auto.push(change)
       else if (proposal.reason !== 'standby') plan.suggestions.push(change)
-    } else if (isNew && (isSlug(ws.name) || record?.stage === 'standby')) {
+    } else if (auto && isSlug(ws.name)) {
+      // A standby name never waits: it replaced Orca's title, so none is coming.
       plan.waiting.push(ws.id)
     }
   }

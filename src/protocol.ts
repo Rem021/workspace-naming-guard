@@ -4,6 +4,13 @@ export {}
 declare module 'orca' {
   type NamingReason = 'agent-title' | 'branch' | 'prefix' | 'standby' | 'undo'
 
+  /** Feedback on the last pass or action; the panel words it in Orca's language. */
+  type NamingNotice = {
+    code: 'rename-failed' | 'apply-failed' | 'stale' | 'already-undone' | 'gone' | 'renamed-since'
+    /** An error code, a count, or the workspace's current name. */
+    detail?: string
+  }
+
   /** Everything the panel draws; the worker sends a fresh one after each change. */
   type NamingView = {
     /** `unsupported`: this Orca has no workspace.rename (needs 1.4.256 or later). */
@@ -13,7 +20,8 @@ declare module 'orca' {
     checkedAt: number | null
     enabled: boolean
     standbyNames: boolean
-    aliasErrors: string[]
+    /** Lines of the aliases setting that were skipped. */
+    aliasErrors: { line: number; text: string }[]
     counts: { managed: number; locked: number; waiting: number; renamedToday: number }
     suggestions: { id: string; current: string; proposed: string; reason: NamingReason }[]
     history: {
@@ -24,8 +32,7 @@ declare module 'orca' {
       at: number
       undone: boolean
     }[]
-    /** One-off feedback for the last action, such as an Undo that could not run. */
-    notice: string | null
+    notice: NamingNotice | null
   }
 
   interface PluginRequests {

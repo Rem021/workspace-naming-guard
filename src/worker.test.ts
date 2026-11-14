@@ -16,15 +16,23 @@ const ws = (id: string, name: string, over: Partial<Workspace> = {}): Workspace 
   ...over
 })
 
-function sidebar(initial: Workspace[], options: { settings?: Record<string, JsonValue>; storage?: Record<string, JsonValue>; failRename?: string } = {}) {
+function sidebar(
+  initial: Workspace[],
+  options: { settings?: Record<string, JsonValue>; storage?: Record<string, JsonValue>; failRename?: string; failFor?: string; truncated?: () => boolean; hidden?: () => string[] } = {}
+) {
   const workspaces = initial.map((w) => ({ ...w }))
   const host = mockHost({
     settings: options.settings,
     storage: options.storage,
     results: {
-      'workspace.list': () => ({ workspaces: workspaces.map((w) => ({ ...w })), truncated: false }),
+      'workspace.list': () => {
+        const hidden = new Set(options.hidden?.() ?? [])
+        const truncated = options.truncated?.() ?? false
+        const listed = workspaces.filter((w) => !hidden.has(w.id))
+        return { workspaces: (truncated ? listed.slice(0, 1) : listed).map((w) => ({ ...w })), truncated }
+      },
       'workspace.rename': ({ workspaceId, name }: { workspaceId: string; name: string }) => {
-        if (options.failRename) throw hostError(options.failRename)
+        if (options.failRename && (!options.failFor || options.failFor === workspaceId)) throw hostError(options.failRename)
         const w = workspaces.find((x) => x.id === workspaceId)
         if (!w) throw hostError('invalid_params', 'no such workspace')
         w.name = name
@@ -120,7 +128,7 @@ test('suggestions are applied or ignored only on request', async () => {
   }
 })
 
-test('paused: nothing is renamed, and the toggle command resumes', async () => {
+test('paused: nothing is renamed, and the toggle command resumes with a suggestion', async () => {
   const s = sidebar([], { settings: { enabled: false } })
   const worker = await mountWorker(main, { host: s.host })
   try {
@@ -132,7 +140,9 @@ test('paused: nothing is renamed, and the toggle command resumes', async () => {
 
     const line = await worker.command('naming.toggle')
     assert.match(String(line), /is on/)
-    assert.equal(s.named('w'), 'Mac｜Write the changelog')
+    // It appeared while paused, so it is only suggested, never renamed on its own.
+    assert.equal(s.named('w'), 'Write the changelog')
+    assert.deepEqual((await worker.request('naming.view')).suggestions.map((x) => x.id), ['w'])
   } finally {
     await worker.deactivate()
   }
@@ -145,8 +155,9 @@ test('aliases and standby names come from settings', async () => {
     await worker.request('naming.check')
     s.workspaces.push(ws('w', 'seagrass'))
     const view = await worker.request('naming.check')
-    assert.match(s.named('w') ?? '', /^Desk｜待命工作区 [0-9a-f]{8}$/)
-    assert.deepEqual(view.aliasErrors, ['line 2: bad line'])
+    assert.match(s.named('w') ?? '', /^Desk｜Standby [0-9a-f]{8}$/)
+    assert.deepEqual(view.aliasErrors, [{ line: 2, text: 'bad line' }])
+    assert.equal(view.counts.waiting, 0)
   } finally {
     await worker.deactivate()
   }
@@ -185,11 +196,96 @@ test('a failed rename is reported and retried, without stopping the worker', asy
     s.workspaces.push(ws('w', 'Ship the release'))
     const view = await worker.request('naming.check')
     assert.equal(view.status, 'active')
-    assert.match(view.notice ?? '', /rate_limited/)
+    assert.deepEqual(view.notice, { code: 'rename-failed', detail: 'rate_limited' })
     assert.equal(s.named('w'), 'Ship the release')
     assert.equal(view.suggestions.length, 0)
     const status = await worker.command('naming.status')
     assert.match(String(status), /Workspace Naming Guard is on/)
+  } finally {
+    await worker.deactivate()
+  }
+})
+
+test('a lock survives the workspace missing from one list', async () => {
+  let hidden: string[] = []
+  const s = sidebar([], { hidden: () => hidden })
+  const worker = await mountWorker(main, { host: s.host })
+  try {
+    await worker.request('naming.check')
+    s.workspaces.push(ws('w', 'Fix login bug'))
+    await worker.request('naming.check')
+    s.workspaces[0].name = 'Scratch notes for Alice'
+    let view = await worker.request('naming.check')
+    assert.equal(view.counts.locked, 1)
+
+    hidden = ['w'] // an SSH host offline, or Orca still starting
+    await worker.request('naming.check')
+    hidden = []
+    view = await worker.request('naming.check')
+    assert.equal(s.named('w'), 'Scratch notes for Alice')
+    assert.equal(view.counts.locked, 1)
+  } finally {
+    await worker.deactivate()
+  }
+})
+
+test('a workspace that appears or is renamed while paused only gets a suggestion', async () => {
+  const s = sidebar([], { settings: { enabled: false } })
+  const worker = await mountWorker(main, { host: s.host })
+  try {
+    await worker.request('naming.check')
+    s.workspaces.push(ws('w', 'My own design notes'))
+    await worker.request('naming.check')
+    const view = await worker.request('naming.setEnabled', { enabled: true })
+    assert.equal(s.named('w'), 'My own design notes')
+    assert.deepEqual(view.suggestions.map((x) => x.id), ['w'])
+  } finally {
+    await worker.deactivate()
+  }
+})
+
+test('a truncated first list does not make old workspaces look new', async () => {
+  let truncated = true
+  const s = sidebar([ws('a', 'Old task one'), ws('b', 'Old task two')], { truncated: () => truncated })
+  const worker = await mountWorker(main, { host: s.host })
+  try {
+    await worker.request('naming.check')
+    truncated = false
+    const view = await worker.request('naming.check')
+    assert.deepEqual(s.host.callsOf('workspace.rename'), [])
+    assert.deepEqual(view.suggestions.map((x) => x.id).sort(), ['a', 'b'])
+  } finally {
+    await worker.deactivate()
+  }
+})
+
+test('Apply carries on past a failed rename and says how many failed', async () => {
+  const s = sidebar([ws('a', 'First old task'), ws('b', 'Second old task'), ws('c', 'Third old task')], { failRename: 'rate_limited', failFor: 'b' })
+  const worker = await mountWorker(main, { host: s.host })
+  try {
+    await worker.request('naming.check')
+    const view = await worker.request('naming.apply', { ids: ['a', 'b', 'c'] })
+    assert.equal(s.named('a'), 'Mac｜First old task')
+    assert.equal(s.named('b'), 'Second old task')
+    assert.equal(s.named('c'), 'Mac｜Third old task')
+    assert.deepEqual(view.notice, { code: 'apply-failed', detail: '1/3 · rate_limited' })
+  } finally {
+    await worker.deactivate()
+  }
+})
+
+test('an undo cannot itself be undone', async () => {
+  const s = sidebar([])
+  const worker = await mountWorker(main, { host: s.host })
+  try {
+    await worker.request('naming.check')
+    s.workspaces.push(ws('w', 'Agent｜Fix flaky tests'))
+    let view = await worker.request('naming.check')
+    view = await worker.request('naming.undo', { key: view.history[0].key })
+    const undoEntry = view.history.find((h) => h.reason === 'undo')
+    view = await worker.request('naming.undo', { key: undoEntry?.key ?? '' })
+    assert.deepEqual(view.notice, { code: 'already-undone' })
+    assert.equal(s.named('w'), 'Agent｜Fix flaky tests')
   } finally {
     await worker.deactivate()
   }

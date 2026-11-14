@@ -6,7 +6,7 @@
   "id": "workspace-naming-guard",
   "name": "Workspace Naming Guard",
   "version": "1.1.0",
-  "description": "Keeps workspace names in a tidy 'Project｜Topic' form: adds the project prefix to the titles Orca gives new workspaces, fixes generic prefixes, suggests names for older workspaces and never overrides a name you set yourself. Uses only Orca's plugin API.",
+  "description": "Keeps workspace names in a tidy 'Project｜Topic' form: adds the project prefix to the titles Orca gives new workspaces, fixes generic prefixes and suggests names for older ones. Once it has named a workspace, your own rename is final. Uses only Orca's plugin API.",
   "author": {
     "name": "Rem021",
     "url": "https://github.com/Rem021"
@@ -80,9 +80,9 @@
       {
         "key": "standbyLabel",
         "title": "Standby label",
-        "description": "The word used in standby names.",
+        "description": "The word used in standby names, such as Standby or 待命工作区.",
         "type": "string",
-        "default": "待命工作区",
+        "default": "Standby",
         "maxLength": 24
       }
     ]
