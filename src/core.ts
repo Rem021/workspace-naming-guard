@@ -267,8 +267,11 @@ export function planAll(
     if (record?.stage === 'final') continue
 
     const prefix = projectPrefix(ws.project, options.aliases)
-    const auto = autoIds.has(ws.id)
-    const proposal = proposeName(ws, prefix, prefixes, options, suffixOf(ws.id), auto)
+    const auto = autoIds.has(ws.id) || record?.stage === 'standby'
+    // A standby is provisional. A later meaningful branch may promote it, even beyond
+    // the new-workspace window; the record/name comparison above protects manual edits.
+    const candidate = record?.stage === 'standby' ? { ...ws, name: '' } : ws
+    const proposal = proposeName(candidate, prefix, prefixes, { ...options, standbyNames: !record && options.standbyNames }, suffixOf(ws.id), auto)
     if (proposal && proposal.after !== ws.name) {
       const change: Change = { id: ws.id, before: ws.name, ...proposal }
       if (auto) plan.auto.push(change)

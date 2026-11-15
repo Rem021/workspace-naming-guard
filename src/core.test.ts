@@ -200,3 +200,23 @@ test('English and Chinese creation placeholders wait instead of becoming final t
     assert.equal(plan([ws({ name })], { options: { ...options, standbyNames: true } }).auto[0].stage, 'standby')
   }
 })
+
+
+test('a plugin-owned standby promotes to a later branch topic outside the auto window', () => {
+  const oldName = 'Mac｜待命工作区 1234abcd'
+  const work = ws({ kind: 'worktree', name: oldName, branch: 'codex/fix-login' })
+  const records = { w1: { name: oldName, stage: 'standby' as const, at: 1 } }
+  const result = plan([work], { baseline: ['w1'], records })
+  assert.equal(result.auto[0].after, 'Mac｜Fix login')
+  assert.equal(result.auto[0].before, oldName)
+  assert.equal(result.auto[0].stage, 'final')
+  assert.deepEqual(plan([{ ...work, name: 'My manual name' }], { records }).auto, [])
+  assert.deepEqual(plan([work], { records: { w1: { ...records.w1, locked: true } } }).auto, [])
+})
+
+test('unowned standby names and owned standby without a title stay untouched', () => {
+  const name = 'Mac｜待命工作区 1234abcd'
+  const work = ws({ name })
+  assert.deepEqual(plan([work]).auto, [])
+  assert.deepEqual(plan([work], { options: { ...options, standbyNames: true }, records: { w1: { name, stage: 'standby', at: 1 } } }).auto, [])
+})
