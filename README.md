@@ -1,8 +1,23 @@
 # Workspace Naming Guard
 
-**Keeps [Orca](https://orca.dev/) workspace names in one tidy `Project｜Topic` form. Once it has named a workspace, your own rename is final.**
+**Automatically add the project name to new Orca workspace titles.**
+
+Turn `Fix auth token refresh` into `CloudNode｜Fix auth token refresh`, so you can find the right workspace at a glance. Includes rename history, suggestions, and Undo.
+
+[中文说明](#中文说明) · **[Install](#install)** · [How it works](#how-it-works) · [Settings](#settings)
+
+[![Release](https://img.shields.io/github/v/release/Rem021/workspace-naming-guard?style=flat-square)](https://github.com/Rem021/workspace-naming-guard/releases) [![License](https://img.shields.io/badge/license-MIT-blue?style=flat-square)](LICENSE)
+
+## Install
+
+Requires **Orca 1.4.256 or later**.
+
+- **From Orca:** Settings → Plugins → search for *Workspace Naming Guard* (community catalog) → Install.
+- **From Git:** `orca plugin install https://github.com/Rem021/workspace-naming-guard.git`
 
 ![Workspace Naming Guard](assets/cover.png)
+
+## Before and after
 
 When you run many agents across many repositories, the sidebar fills up with `blobfish`, `codex/mojarra` and titles that don't say which project they belong to. Naming Guard watches new workspaces and gives each one a name you can scan at a glance:
 
@@ -58,13 +73,6 @@ Naming Guard is a `trusted-worker` plugin that uses **only Orca's plugin API**, 
 - `storage:own` and `settings:own`: its own rename history and your settings.
 
 It does not read Orca's files or databases, start other programs, use the network, call an LLM or touch Git branches and folders. Every rename is recorded in Orca's plugin audit log.
-
-## Install
-
-Requires **Orca 1.4.256 or later**.
-
-- **From Orca:** Settings → Plugins → search for *Workspace Naming Guard* (community catalog) → Install.
-- **From Git:** `orca plugin install https://github.com/Rem021/workspace-naming-guard.git`
 
 ## Develop
 
