@@ -17,7 +17,7 @@ When you run many agents across many repositories, the sidebar fills up with `bl
 
 ![How a workspace gets its name](assets/screenshot-lifecycle.png)
 
-1. **A new workspace waits up to 60 seconds for a title.** Naming Guard adds the project prefix when Orca supplies a workspace title. If none arrives, it gives the workspace a standby name by default. Turn on *standby names* if you would rather see `Project｜待命工作区 1a2b3c4d` right away (this replaces Orca's own AI title for that workspace).
+1. **A new workspace waits for a meaningful title.** Naming Guard adds the project prefix when Orca supplies a workspace title. It does not write a standby name merely because time passed. Turn on *standby names* if you would rather see `Project｜待命工作区 1a2b3c4d` right away (this replaces Orca's own AI title for that workspace).
 2. **The title gets the project prefix.** The prefix is the project's name, or the alias you set. Generic prefixes such as `Agent｜`, an alias, or another project's name are replaced. A deliberate prefix of your own is kept word for word.
 3. **Your rename is final.** If you rename a workspace yourself after Naming Guard did, it is locked and never touched again. Undo and Ignore lock it too.
 
@@ -47,7 +47,6 @@ The status bar item shows the same state; click it for a one-line summary. Comma
 | Rename new workspaces automatically | On | Off: only suggestions, nothing is renamed on its own. |
 | Project prefix aliases | empty | One per line, `Project name = Prefix`, e.g. `my-api-v2 = API`. Lines starting with `#` are ignored; bad lines are shown in the panel. |
 | Give new workspaces a standby name right away | Off | Names a new workspace `Prefix｜<label> <8-char id>` as soon as it is created. |
-| Name workspaces when Orca provides no title | On | After 60 seconds without a title, apply a standby name. Turn off to keep waiting within the 6-hour window. |
 | Standby label | `待命工作区` | The word used in standby names, e.g. `待命工作区`. |
 
 ## Privacy and access
@@ -85,9 +84,9 @@ orca plugin dev watch .    # loads it into Orca and streams logs
 
 ### Current limitations and roadmap
 
-Orca 1.4.258 does not expose native chat titles through its plugin API. A standby rename fixes the sidebar name, but also prevents Orca from later replacing it with its own AI title. It does not summarize the chat.
+Native chat tab titles and sidebar workspace titles are different. This plugin uses sidebar workspace titles and branch names; it does not read chat contents. Orca 1.4.259's `agent.listSessions` is a separate history API, not a reliable source of native chat titles for every workspace (it excludes Antigravity IDE conversations and matches history by directory). This plugin does not request history access.
 
-Orca 1.4.259 adds `agent.listSessions` (host API 1.9). A later version will use it to name workspaces from agent chat titles as well, including Orca's native chat sessions and Chinese first prompts.
+Version 1.1.1's default 60-second fallback was a regression: writing a standby name can prevent Orca's future AI workspace title. Version 1.1.2 removes that fallback, including previously saved `fallbackNames: true`. Immediate standby naming is still explicit opt-in. Standby names the plugin owns can be promoted when a meaningful branch later appears; manually renamed/ignored/undone workspaces remain protected.
 
 ---
 
@@ -95,7 +94,7 @@ Orca 1.4.259 adds `agent.listSessions` (host API 1.9). A later version will use 
 
 **Workspace Naming Guard（命名守卫）**把 Orca 的工作区名称统一成 `项目｜主题` 格式，并且永远尊重你手动起的名字。
 
-- **标题超时补名（默认开启）**：新工作区等待 60 秒仍没有 Orca 工作区标题，会自动命名为 `项目｜待命工作区 <8位ID>`。可在设置关闭超时补名；这不是聊天摘要，写入待命名后会替代 Orca 后续的 AI 工作区标题。
+- **修正 v1.1.1 回归**：已移除默认 60 秒超时补名，也不再读取旧的 `fallbackNames` 开关。没有可靠主题时继续等待；只有显式开启“立即待命命名”才会写入待命名称。聊天页签标题与工作区标题不同，当前插件未接入原生聊天标题。
 - **新工作区自动命名**：Orca 根据你发给智能体的第一条消息给工作区起名后，命名守卫补上项目前缀，例如 `Fix auth token refresh` → `CloudNode｜Fix auth token refresh`；中文标题同样适用。分支名本身有意义的工作树（如 `feature/login-page`）直接按分支命名；文件夹会话的 `naming-guard-fix` 这类名称也会转换为主题。同目录、无 Git 分支的会话不再误判为项目主检出。
 - **前缀修正**：`Agent｜…` 这类通用前缀、别名或其他项目的前缀会换成本项目前缀；你自己刻意写的前缀保持原样。
 - **你的改名是最终的**：命名守卫命名过的工作区，你手动改名、点“撤销”或“忽略”之后不再被改动。创建时手填的名字会像 Orca 标题一样补一次前缀；只有插件开启期间、6 小时内新出现的工作区会被自动命名，暂停期间新工作区只进“建议”。

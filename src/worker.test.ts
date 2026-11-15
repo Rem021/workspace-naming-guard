@@ -295,37 +295,31 @@ function knownState(seen: Record<string, number>, baseline: string[] = []): Reco
   return { 'state-v2': { version: 2, baseline, baselineComplete: true, seen, gone: {}, records: {}, history: [], pending: null } }
 }
 
-test('untitled workspaces get a fallback after the grace period, including after restart', async () => {
-  const now = Date.now()
-  const s = sidebar([ws('late', 'blobfish'), ws('early', 'chiton'), ws('old', 'knifefish')], {
-    storage: knownState({ late: now - 61_000, early: now }, ['old'])
-  })
-  const worker = await mountWorker(main, { host: s.host })
-  try {
-    const view = await worker.request('naming.check')
-    assert.match(s.named('late') ?? '', /^Mac｜待命工作区 [0-9a-f]{8}$/)
-    assert.equal(s.named('early'), 'chiton')
-    assert.equal(s.named('old'), 'knifefish')
-    assert.equal(view.counts.waiting, 1)
-    assert.equal(view.history[0].reason, 'standby')
-    await worker.request('naming.check')
-    assert.equal(s.host.callsOf('workspace.rename').length, 1)
-  } finally { await worker.deactivate() }
-})
-
-test('a real title beats fallback; explicit opt-out and pause are respected', async () => {
-  for (const settings of [{}, { fallbackNames: false }, { enabled: false }] as Record<string, JsonValue>[]) {
-    const s = sidebar([ws('a', 'Fix login bug'), ws('b', 'New workspace')], {
-      settings, storage: knownState({ a: Date.now() - 61_000, b: Date.now() - 61_000 })
+test('elapsed time and a saved v1.1.1 fallback setting never write standby names', async () => {
+  for (const settings of [{}, { fallbackNames: true }] as Record<string, JsonValue>[]) {
+    const s = sidebar([ws('late', 'blobfish'), ws('old', 'chiton')], {
+      settings, storage: knownState({ late: Date.now() - 61_000, old: Date.now() - 7 * 60 * 60_000 })
     })
     const worker = await mountWorker(main, { host: s.host })
     try {
-      await worker.request('naming.check')
-      assert.equal(s.named('a'), settings.enabled === false ? 'Fix login bug' : 'Mac｜Fix login bug')
-      if (settings.enabled === false || settings.fallbackNames === false) assert.equal(s.named('b'), 'New workspace')
-      else assert.match(s.named('b') ?? '', /^Mac｜待命工作区 /)
+      const view = await worker.request('naming.check')
+      assert.equal(s.named('late'), 'blobfish')
+      assert.equal(s.named('old'), 'chiton')
+      assert.equal(view.counts.waiting, 1)
+      assert.deepEqual(s.host.callsOf('workspace.rename'), [])
     } finally { await worker.deactivate() }
   }
+})
+
+test('a delayed real title is still used when timeout fallback is removed', async () => {
+  const s = sidebar([ws('late', 'blobfish')], { storage: knownState({ late: Date.now() - 120_000 }) })
+  const worker = await mountWorker(main, { host: s.host })
+  try {
+    await worker.request('naming.check')
+    s.workspaces[0].name = 'Fix login bug'
+    await worker.request('naming.check')
+    assert.equal(s.named('late'), 'Mac｜Fix login bug')
+  } finally { await worker.deactivate() }
 })
 
 test('a creation event before the first list is not swallowed by the baseline', async () => {
@@ -371,19 +365,33 @@ test('a creation event while paused cannot become automatic when its row appears
   } finally { await worker.deactivate() }
 })
 
-test('fallback keeps the six-hour boundary and respects a custom standby label and a subsequent rename', async () => {
-  const s = sidebar([ws('expired', 'blobfish'), ws('recent', 'chiton')], {
-    settings: { standbyLabel: 'Waiting' },
-    storage: knownState({ expired: Date.now() - 7 * 60 * 60_000, recent: Date.now() - 61_000 })
+test('standby inventory contains only unchanged names owned by this plugin', async () => {
+  const records = {
+    owned: { name: 'Mac｜Waiting 1234abcd', stage: 'standby', at: 1 },
+    edited: { name: 'Mac｜Waiting 5678abcd', stage: 'standby', at: 1 },
+    locked: { name: 'Mac｜Waiting 9012abcd', stage: 'standby', at: 1, locked: true }
+  }
+  const state = { version: 2, baseline: [], seen: {}, records, history: [], pending: null }
+  const s = sidebar([ws('owned', records.owned.name), ws('edited', 'Personal notes'), ws('locked', records.locked.name), ws('unowned', 'Mac｜Waiting aabbccdd')], {
+    settings: { enabled: false }, storage: { 'state-v2': state }
   })
   const worker = await mountWorker(main, { host: s.host })
   try {
+    assert.deepEqual(await worker.request('naming.standbyInventory'), [{ id: 'owned', name: records.owned.name, at: 1 }])
+    assert.deepEqual(s.host.callsOf('workspace.rename'), [])
+  } finally { await worker.deactivate() }
+})
+
+test('creation events use the list identity when raw and listed workspace ids differ', async () => {
+  let truncated = true
+  const s = sidebar([ws('old', 'Old project notes')], { truncated: () => truncated })
+  const worker = await mountWorker(main, { host: s.host })
+  try {
     await worker.request('naming.check')
-    assert.equal(s.named('expired'), 'blobfish')
-    assert.match(s.named('recent') ?? '', /^Mac｜Waiting [0-9a-f]{8}$/)
-    s.workspaces[1].name = 'Personal notes'
-    const view = await worker.request('naming.check')
-    assert.equal(s.named('recent'), 'Personal notes')
-    assert.equal(view.counts.locked, 1)
+    await worker.emit('workspace.created', { workspaceId: 'raw-id', workspaceListId: 'identity:wt2:local:new', kind: 'worktree', path: '/Users/me/new', branch: '' })
+    s.workspaces.push(ws('identity:wt2:local:new', 'Fix new workspace'))
+    truncated = false
+    await worker.request('naming.check')
+    assert.equal(s.named('identity:wt2:local:new'), 'Mac｜Fix new workspace')
   } finally { await worker.deactivate() }
 })

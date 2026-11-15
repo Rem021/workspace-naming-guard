@@ -5,7 +5,7 @@
   "pluginApi": 1,
   "id": "workspace-naming-guard",
   "name": "Workspace Naming Guard",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "description": "Keeps workspace names in a tidy 'Project｜Topic' form: adds the project prefix to the titles Orca gives new workspaces, fixes generic prefixes and suggests names for older ones. Once it has named a workspace, your own rename is final. Uses only Orca's plugin API.",
   "author": {
     "name": "Rem021",
@@ -76,13 +76,6 @@
         "description": "Names a new workspace 'Project｜<label> 1a2b3c4d' as soon as it is created. This replaces Orca's own AI title for that workspace, so leave it off if you rely on those titles.",
         "type": "boolean",
         "default": false
-      },
-      {
-        "key": "fallbackNames",
-        "title": "Name workspaces when Orca provides no title",
-        "description": "After 60 seconds without a workspace title, give new workspaces a standby name. This replaces Orca's future AI workspace title. Turn off to keep waiting within the 6-hour naming window.",
-        "type": "boolean",
-        "default": true
       },
       {
         "key": "standbyLabel",

@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.1.2 (2026-11-15)
+
+- Remove the default 60-second standby fallback introduced in 1.1.1, including its saved setting. It prematurely fixed workspace names and prevented later Orca AI titles. Without a meaningful title, the default behavior is to leave the workspace alone.
+- Promote plugin-owned standby names when a meaningful branch later becomes available, including beyond the initial six-hour window. Manual edits, Undo and Ignore remain protected.
+- Use `workspaceListId` from creation events on newer hosts so events and list rows match even when raw ids differ.
+- Add a read-only inventory of unchanged plugin-owned standby names for targeted recovery; no additional capabilities.
+- Clarify that sidebar titles are separate from native chat tab titles. No claim of native-chat title support or new history access.
+
 ## 1.1.1 (2026-11-14)
 
 - New untitled workspaces now receive a standby name after a 60-second title grace period by default. The `fallbackNames` setting can disable this; `standbyNames` still opts into immediate naming. The default standby label is `待命工作区` (saved custom labels are preserved).

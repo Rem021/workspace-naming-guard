@@ -19,7 +19,6 @@ const MAX_APPLY = 50
 const HISTORY_LIMIT = 200
 const DAY_MS = 24 * 60 * 60_000
 const DEFAULT_STANDBY_LABEL = '待命工作区'
-const TITLE_GRACE_MS = 60_000
 
 type Reason = NamingView['history'][number]['reason']
 type HistoryItem = {
@@ -46,7 +45,7 @@ type State = {
   /** Written before each rename so a crash mid-rename is reconciled on the next pass. */
   pending: (Change & { at: number }) | null
 }
-type Settings = Options & { enabled: boolean; fallbackNames: boolean; aliasErrors: AliasError[] }
+type Settings = Options & { enabled: boolean; aliasErrors: AliasError[] }
 
 /** Stops the running activation: its timer, its subscriptions and any rename still queued. */
 let stopCurrent: (() => void) | null = null
@@ -88,7 +87,6 @@ export default function activate(orca: OrcaWorkerApi): void {
     return {
       enabled: raw.enabled !== false,
       standbyNames: raw.standbyNames === true,
-      fallbackNames: raw.fallbackNames !== false,
       standbyLabel: label || DEFAULT_STANDBY_LABEL,
       aliases,
       aliasErrors: errors
@@ -288,11 +286,6 @@ export default function activate(orca: OrcaWorkerApi): void {
 
     const eligible = autoIds(state, now)
     lastPlan = planAll(workspaces, eligible, state.records, settings, shortHash)
-    if (settings.fallbackNames && !settings.standbyNames) {
-      const overdue = new Set(lastPlan.waiting.filter((id) => now - state.seen[id] >= TITLE_GRACE_MS))
-      const fallback = planAll(workspaces, overdue, state.records, { ...settings, standbyNames: true }, shortHash)
-      lastPlan.auto.push(...fallback.auto)
-    }
     for (const id of lastPlan.locks) {
       state.records[id] = { ...state.records[id], name: byId.get(id)?.name ?? '', locked: true, at: now }
       dirty = true
@@ -398,6 +391,16 @@ export default function activate(orca: OrcaWorkerApi): void {
 
   orca.panels.handle('naming.view', () => (view.status === 'starting' ? serial(() => guardedPass()) : view))
   orca.panels.handle('naming.check', () => serial(() => guardedPass()))
+  // Read-only recovery inventory: only names this plugin wrote and still owns.
+  orca.panels.handle('naming.standbyInventory', () => serial(async () => {
+    const state = await loadState()
+    if (!state) return []
+    const { workspaces } = await listWorkspaces()
+    return workspaces.filter((ws) => {
+      const record = state.records[ws.id]
+      return record?.stage === 'standby' && !record.locked && record.name === ws.name
+    }).map((ws) => ({ id: ws.id, name: ws.name, at: state.records[ws.id].at }))
+  }))
   orca.panels.handle('naming.apply', ({ ids }) => serial(() => act(ids, 'apply')))
   orca.panels.handle('naming.ignore', ({ ids }) => serial(() => act(ids, 'ignore')))
   orca.panels.handle('naming.undo', ({ key }) => serial(() => undo(key)))
@@ -413,11 +416,11 @@ export default function activate(orca: OrcaWorkerApi): void {
   orca.commands.register('naming.toggle', async () => describe(await serial(toggle)))
 
   const subscriptions: Disposable[] = [
-    orca.events.on('workspace.created', ({ workspaceId }) => {
+    orca.events.on('workspace.created', ({ workspaceId, workspaceListId }) => {
       const at = Date.now()
       return serial(async () => {
         const { enabled } = await readSettings()
-        created.set(workspaceId, { at, enabled })
+        created.set(workspaceListId ?? workspaceId, { at, enabled })
         schedule(CREATED_DEBOUNCE_MS)
       })
     }),

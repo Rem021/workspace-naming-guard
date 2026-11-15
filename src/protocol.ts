@@ -37,6 +37,8 @@ declare module 'orca' {
 
   interface PluginRequests {
     'naming.view': { output: NamingView }
+    /** Read-only inventory for recovering plugin-owned standby names. */
+    'naming.standbyInventory': { output: { id: string; name: string; at: number }[] }
     /** Runs a pass now. */
     'naming.check': { output: NamingView }
     /** Applies suggestions by workspace id. */
