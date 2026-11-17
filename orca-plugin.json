@@ -5,8 +5,8 @@
   "pluginApi": 1,
   "id": "workspace-naming-guard",
   "name": "Workspace Naming Guard",
-  "version": "1.1.2",
-  "description": "Keeps workspace names in a tidy 'Project｜Topic' form: adds the project prefix to the titles Orca gives new workspaces, fixes generic prefixes and suggests names for older ones. Once it has named a workspace, your own rename is final. Uses only Orca's plugin API.",
+  "version": "1.2.0",
+  "description": "Names Orca workspaces Project｜Topic, using workspace and branch titles plus exact chat-title observations from the optional official-CLI bridge. Preserves manual renames and supports Undo.",
   "author": {
     "name": "Rem021",
     "url": "https://github.com/Rem021"
@@ -20,10 +20,18 @@
   },
   "main": "src/worker.ts",
   "capabilities": [
-    { "kind": "workspace:read" },
-    { "kind": "workspace:write" },
-    { "kind": "storage:own" },
-    { "kind": "settings:own" }
+    {
+      "kind": "workspace:read"
+    },
+    {
+      "kind": "workspace:write"
+    },
+    {
+      "kind": "storage:own"
+    },
+    {
+      "kind": "settings:own"
+    }
   ],
   "contributes": {
     "panels": [
@@ -36,12 +44,23 @@
       }
     ],
     "commands": [
-      { "id": "naming.status", "title": "Naming Guard: Show Status" },
-      { "id": "naming.check", "title": "Naming Guard: Check Names Now" },
-      { "id": "naming.toggle", "title": "Naming Guard: Pause or Resume" }
+      {
+        "id": "naming.status",
+        "title": "Naming Guard: Show Status"
+      },
+      {
+        "id": "naming.check",
+        "title": "Naming Guard: Check Names Now"
+      },
+      {
+        "id": "naming.toggle",
+        "title": "Naming Guard: Pause or Resume"
+      }
     ],
     "events": [
-      { "on": "workspace.created" }
+      {
+        "on": "workspace.created"
+      }
     ],
     "statusBarItems": [
       {

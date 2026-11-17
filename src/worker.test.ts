@@ -295,6 +295,127 @@ function knownState(seen: Record<string, number>, baseline: string[] = []): Reco
   return { 'state-v2': { version: 2, baseline, baselineComplete: true, seen, gone: {}, records: {}, history: [], pending: null } }
 }
 
+const title = (id: string, text: string, sourceKey = 'chat:one') => ({ id, title: text, sourceKey })
+
+test('a manual rename between planning and writing is preserved on this and later passes', async () => {
+  let reads = 0
+  const current = ws('a', 'blobfish')
+  const host = mockHost({ storage: knownState({ a: Date.now() }), results: {
+    'workspace.list': () => {
+      if (++reads === 2) current.name = '手动保留的名字'
+      return { workspaces: [{ ...current }], truncated: false }
+    },
+    'workspace.rename': () => { throw new Error('must not write') }
+  } })
+  const worker = await mountWorker(main, { host })
+  try {
+    await worker.request('naming.observeTitles', { titles: [title('a', '自动标题')] })
+    await worker.request('naming.check')
+    assert.equal(current.name, '手动保留的名字')
+    assert.deepEqual(host.callsOf('workspace.rename'), [])
+    assert.equal((await worker.request('naming.view')).counts.locked, 1)
+  } finally { await worker.deactivate() }
+})
+
+test('native chat observations name the exact workspace even when directories are shared and naming is delayed', async () => {
+  const s = sidebar([ws('a', 'seacucumber'), ws('b', 'fiddler')], {
+    storage: knownState({ a: Date.now() - 2 * 24 * 60 * 60_000, b: Date.now() })
+  })
+  s.workspaces[1].path = s.workspaces[0].path
+  const worker = await mountWorker(main, { host: s.host })
+  try {
+    const view = await worker.request('naming.observeTitles', { titles: [title('a', 'Mac｜修复自动命名')] })
+    assert.equal(s.named('a'), 'Mac｜修复自动命名')
+    assert.equal(s.named('b'), 'fiddler')
+    assert.equal(view.titleSource, 'connected')
+    assert.equal(view.history[0].reason, 'chat-title')
+  } finally { await worker.deactivate() }
+})
+
+test('same chat may refine its title but a different chat or a manual rename cannot take over', async () => {
+  const s = sidebar([ws('a', 'blobfish')], { storage: knownState({ a: Date.now() }) })
+  const worker = await mountWorker(main, { host: s.host })
+  try {
+    await worker.request('naming.observeTitles', { titles: [title('a', '修复界面')] })
+    await worker.request('naming.observeTitles', { titles: [title('a', '修复相机界面')] })
+    assert.equal(s.named('a'), 'Mac｜修复相机界面')
+    await worker.request('naming.observeTitles', { titles: [title('a', '另一个任务', 'chat:two')] })
+    assert.equal(s.named('a'), 'Mac｜修复相机界面')
+    s.workspaces[0].name = '我的手动名字'
+    const view = await worker.request('naming.observeTitles', { titles: [title('a', '再次修复相机')] })
+    assert.equal(s.named('a'), '我的手动名字')
+    assert.equal(view.counts.locked, 1)
+  } finally { await worker.deactivate() }
+})
+
+test('old workspaces need apply, and Undo prevents later chat observations from renaming', async () => {
+  const s = sidebar([ws('a', 'cisco')])
+  const worker = await mountWorker(main, { host: s.host })
+  try {
+    let view = await worker.request('naming.observeTitles', { titles: [title('a', 'GitHub｜项目流量分析')] })
+    assert.equal(s.named('a'), 'cisco')
+    assert.equal(view.suggestions[0].proposed, 'Mac｜项目流量分析')
+    view = await worker.request('naming.apply', { ids: ['a'] })
+    assert.equal(s.named('a'), 'Mac｜项目流量分析')
+    await worker.request('naming.undo', { key: view.history[0].key })
+    await worker.request('naming.observeTitles', { titles: [title('a', '新的分析标题')] })
+    assert.equal(s.named('a'), 'cisco')
+  } finally { await worker.deactivate() }
+})
+
+test('plugin branch and standby names can graduate to chat titles; intentional names stay intact', async () => {
+  const s = sidebar([], { settings: { standbyNames: true } })
+  const worker = await mountWorker(main, { host: s.host })
+  try {
+    await worker.request('naming.check')
+    s.workspaces.push(ws('branch', 'codex/fix-login', { kind: 'worktree', branch: 'codex/fix-login' }), ws('standby', 'blobfish'), ws('manual', '个人｜重要笔记'))
+    await worker.request('naming.check')
+    assert.equal(s.named('branch'), 'Mac｜Fix login')
+    await worker.request('naming.observeTitles', { titles: ['branch', 'standby', 'manual'].map((id) => title(id, '修复登录问题')) })
+    assert.equal(s.named('branch'), 'Mac｜修复登录问题')
+    assert.equal(s.named('standby'), 'Mac｜修复登录问题')
+    assert.equal(s.named('manual'), '个人｜重要笔记')
+  } finally { await worker.deactivate() }
+})
+
+test('expired observations and default chat labels never rename a workspace', async () => {
+  const s = sidebar([ws('a', 'blobfish')])
+  const worker = await mountWorker(main, { host: s.host })
+  const clock = Date.now
+  try {
+    await worker.request('naming.observeTitles', { titles: [title('a', 'New Chat')] })
+    assert.deepEqual((await worker.request('naming.view')).suggestions, [])
+    await worker.request('naming.observeTitles', { titles: [title('a', '修复命名')] })
+    Date.now = () => clock() + 121_000
+    const view = await worker.request('naming.apply', { ids: ['a'] })
+    assert.equal(s.named('a'), 'blobfish')
+    assert.equal(view.titleSource, 'disconnected')
+  } finally { Date.now = clock; await worker.deactivate() }
+})
+
+test('malformed or duplicate title observations are rejected atomically', async () => {
+  const s = sidebar([])
+  const worker = await mountWorker(main, { host: s.host })
+  try {
+    await assert.rejects(() => worker.request('naming.observeTitles', { titles: [title('a', '好标题'), title('a', '冲突标题')] }))
+    await assert.rejects(() => worker.request('naming.observeTitles', { titles: [title('a', 'x'.repeat(513))] }))
+    assert.deepEqual(s.host.callsOf('workspace.rename'), [])
+  } finally { await worker.deactivate() }
+})
+
+test('a title arriving while paused stays a suggestion after resuming', async () => {
+  const s = sidebar([], { settings: { enabled: false } })
+  const worker = await mountWorker(main, { host: s.host })
+  try {
+    await worker.request('naming.check')
+    s.workspaces.push(ws('a', 'blobfish'))
+    await worker.request('naming.observeTitles', { titles: [title('a', '任务主题')] })
+    const view = await worker.request('naming.setEnabled', { enabled: true })
+    assert.equal(s.named('a'), 'blobfish')
+    assert.equal(view.suggestions[0].proposed, 'Mac｜任务主题')
+  } finally { await worker.deactivate() }
+})
+
 test('elapsed time and a saved v1.1.1 fallback setting never write standby names', async () => {
   for (const settings of [{}, { fallbackNames: true }] as Record<string, JsonValue>[]) {
     const s = sidebar([ws('late', 'blobfish'), ws('old', 'chiton')], {
@@ -305,7 +426,7 @@ test('elapsed time and a saved v1.1.1 fallback setting never write standby names
       const view = await worker.request('naming.check')
       assert.equal(s.named('late'), 'blobfish')
       assert.equal(s.named('old'), 'chiton')
-      assert.equal(view.counts.waiting, 1)
+      assert.equal(view.counts.waiting, 2)
       assert.deepEqual(s.host.callsOf('workspace.rename'), [])
     } finally { await worker.deactivate() }
   }
