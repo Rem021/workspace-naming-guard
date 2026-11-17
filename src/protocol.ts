@@ -2,7 +2,7 @@
 export {}
 
 declare module 'orca' {
-  type NamingReason = 'agent-title' | 'branch' | 'prefix' | 'standby' | 'undo'
+  type NamingReason = 'agent-title' | 'chat-title' | 'branch' | 'prefix' | 'standby' | 'undo'
 
   /** Feedback on the last pass or action; the panel words it in Orca's language. */
   type NamingNotice = {
@@ -20,6 +20,8 @@ declare module 'orca' {
     checkedAt: number | null
     enabled: boolean
     standbyNames: boolean
+    titleSource?: 'connected' | 'disconnected'
+    titleSyncAt?: number | null
     /** Lines of the aliases setting that were skipped. */
     aliasErrors: { line: number; text: string }[]
     counts: { managed: number; locked: number; waiting: number; renamedToday: number }
@@ -36,6 +38,9 @@ declare module 'orca' {
   }
 
   interface PluginRequests {
+    /** Exact associations from the optional official-CLI companion; no transcript text. */
+    'naming.observeTitles': { input: { titles: { id: string; title: string; sourceKey: string }[] }; output: NamingView }
+
     'naming.view': { output: NamingView }
     /** Read-only inventory for recovering plugin-owned standby names. */
     'naming.standbyInventory': { output: { id: string; name: string; at: number }[] }

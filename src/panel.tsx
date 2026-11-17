@@ -45,6 +45,8 @@ const EN = {
   },
   aliasErrors: 'Some alias lines were skipped',
   aliasHint: 'Write each alias as "Repo name = Prefix" in Settings → Plugins → Workspace Naming Guard.',
+  titleConnected: 'Chat titles connected',
+  titleDisconnected: 'Chat title connector is offline. Workspace and branch naming still works. See README for connector setup.',
   checked: 'Checked',
   waiting: (n: number) => `${n} waiting for a title`,
   renamedToday: 'Renamed (24 h)',
@@ -66,15 +68,16 @@ const EN = {
   check: 'Check now',
   settingsHint: 'Aliases and standby names: Settings → Plugins → Workspace Naming Guard.',
   undone: '(undone)',
-  reasons: { 'agent-title': 'Agent title', branch: 'Branch', prefix: 'Prefix', standby: 'Standby', undo: 'Undo' },
+  reasons: { 'chat-title': 'Chat title', 'agent-title': 'Agent title', branch: 'Branch', prefix: 'Prefix', standby: 'Standby', undo: 'Undo' },
   help: [
     '**New workspaces** are named `Project｜Topic` automatically:',
     '',
     "1. Orca names a workspace from your first message to its agent; Naming Guard adds the project prefix (`Fix auth token refresh` → `CloudNode｜Fix auth token refresh`).",
-    '2. A worktree whose branch already says what it is for (`feature/login-page`) is named from the branch.',
-    '3. Generic or wrong prefixes (`Agent｜…`, another project’s name, an alias) are replaced with the project’s own.',
+    '2. The optional official-CLI connector supplies titles from the exact chat/workspace association. A branch or standby name can then become the chat topic; manual names stay protected.',
+    '3. A worktree whose branch already says what it is for (`feature/login-page`) is named from the branch.',
+    '4. Generic or wrong prefixes (`Agent｜…`, another project’s name, an alias) are replaced with the project’s own.',
     '',
-    '**Older workspaces** (from before the plugin ran, or first seen more than 6 hours ago) are never renamed on their own: they show up under Suggestions.',
+    '**Older workspaces** (from before the plugin ran) are never renamed on their own: they show up under Suggestions.',
     '',
     '**Your renames are final.** After Naming Guard has named a workspace, rename it yourself (or press Undo or Ignore) and it is left alone from then on. A name typed when creating a workspace is treated like Orca’s title and gets the prefix once; while paused, nothing is renamed and new workspaces only get suggestions.',
     '',
@@ -100,6 +103,8 @@ const ZH: typeof EN = {
   },
   aliasErrors: '部分别名行已跳过',
   aliasHint: '别名格式为“仓库名 = 前缀”，在 设置 → 插件 → Workspace Naming Guard 中填写。',
+  titleConnected: '聊天标题已连接',
+  titleDisconnected: '聊天标题桥接器未连接。工作区标题和分支命名仍可用；连接步骤见 README。',
   checked: '上次检查',
   waiting: (n: number) => `${n} 个等待标题`,
   renamedToday: '24 小时内重命名',
@@ -121,15 +126,16 @@ const ZH: typeof EN = {
   check: '立即检查',
   settingsHint: '别名与待命名称：设置 → 插件 → Workspace Naming Guard。',
   undone: '（已撤销）',
-  reasons: { 'agent-title': '智能体标题', branch: '分支', prefix: '前缀', standby: '待命', undo: '撤销' },
+  reasons: { 'chat-title': '聊天标题', 'agent-title': '智能体标题', branch: '分支', prefix: '前缀', standby: '待命', undo: '撤销' },
   help: [
     '**新工作区**会自动命名为 `项目｜主题`：',
     '',
     '1. Orca 根据你发给智能体的第一条消息为工作区起名，命名守卫补上项目前缀（`Fix auth token refresh` → `CloudNode｜Fix auth token refresh`）。',
-    '2. 分支名本身已说明用途的工作树（如 `feature/login-page`）直接按分支命名。',
-    '3. 通用或错误的前缀（`Agent｜…`、其他项目名、别名）会换成本项目前缀。',
+    '2. 可选的官方 CLI 桥接器提供精确关联的聊天标题，插件生成的分支名或待命名可以升级为聊天主题，手动命名不受影响。',
+    '3. 分支名本身已说明用途的工作树（如 `feature/login-page`）直接按分支命名。',
+    '4. 通用或错误的前缀（`Agent｜…`、其他项目名、别名）会换成本项目前缀。',
     '',
-    '**较早的工作区**（插件运行前已有，或首次出现已超过 6 小时）不会被自动改名，只出现在“建议”里。',
+    '**较早的工作区**（插件运行前已有）不会被自动改名，只出现在“建议”里。',
     '',
     '**你的改名是最终的。**命名守卫命名过的工作区，你手动改名（或点“撤销”“忽略”）后就不再改动。创建时手填的名字会像 Orca 标题一样补一次前缀；暂停期间不改任何名字，新工作区只出现在“建议”里。',
     '',
@@ -243,6 +249,7 @@ export default function Panel() {
           {v.aliasErrors.map((e) => `${t.line(e.line)}: ${e.text}`).join('; ')}. {t.aliasHint}
         </Callout>
       ) : null}
+      {v.titleSource === 'disconnected' ? <Callout tone="warning">{t.titleDisconnected}</Callout> : v.titleSource === 'connected' ? <Text muted size="xs">{t.titleConnected}</Text> : null}
       {v.notice ? <Callout tone="accent">{noticeText(t, v.notice)}</Callout> : null}
 
       <Row justify="between">

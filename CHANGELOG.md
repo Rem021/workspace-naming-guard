@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.2.0 — 2026-11-16
+
+- Add an optional official-CLI native-chat title connector with exact workspace/pane associations; no private Orca state access or additional plugin permissions.
+- Promote plugin-owned branch/standby names to actual chat topics, follow refinements from the same chat, and preserve manual names, Ignore and Undo.
+- Keep newly observed workspaces eligible beyond six hours instead of silently abandoning delayed titles.
+- Recheck the workspace name before each write, reject malformed/duplicate observations and expire disconnected title sources.
+- Show connector health in the bilingual panel. Provide a macOS login installer, a one-shot mode and a portable watch mode.
+- Native chat integration is verified with a development-folder install on Orca 1.4.261; marketplace-only installs retain workspace/branch naming without the connector.
+
 ## 1.1.2 (2026-11-15)
 
 - Remove the default 60-second standby fallback introduced in 1.1.1, including its saved setting. It prematurely fixed workspace names and prevented later Orca AI titles. Without a meaningful title, the default behavior is to leave the workspace alone.

@@ -12,6 +12,8 @@ export type Workspace = {
   path: string
   branch: string | null
   hostId: string | null
+  /** Exact-workspace observation, never inferred from a shared directory. */
+  chatTitle?: { title: string; sourceKey: string }
 }
 
 /** What the plugin remembers about a workspace it named. */
@@ -22,10 +24,12 @@ export type NameRecord = {
   at: number
   /** A person renamed it after the plugin did, or chose Ignore or Undo: never touch it again. */
   locked?: boolean
+  source?: Reason
+  sourceKey?: string
 }
 
 /** `undo` only appears in history: the plugin put a name back on request. */
-export type Reason = 'agent-title' | 'branch' | 'prefix' | 'standby' | 'undo'
+export type Reason = 'agent-title' | 'chat-title' | 'branch' | 'prefix' | 'standby' | 'undo'
 
 export type Change = {
   id: string
@@ -33,6 +37,7 @@ export type Change = {
   after: string
   reason: Reason
   stage: NameRecord['stage']
+  sourceKey?: string
 }
 
 export type Options = {
@@ -161,6 +166,14 @@ export function cleanTopic(title: string): string {
   return isMeaningfulTopic(topic) ? normalize(topic) : ''
 }
 
+/** Strip one existing Project｜ prefix instead of duplicating it in the topic. */
+export function topicFromChat(title: string): string {
+  const name = normalize(title)
+  const topic = name.includes(SEP) ? name.slice(name.indexOf(SEP) + 1) : name
+  if (/^(?:codex|claude(?: code)?|gemini|antigravity|assistant|terminal|终端|智能体)(?:\s+\d+)?$/iu.test(topic)) return ''
+  return cleanTopic(topic)
+}
+
 export function isStandbyName(name: string, label: string): boolean {
   const parts = name.split(SEP)
   return parts.length === 2 && new RegExp(`^${escapeRegExp(label)}(?: [0-9a-f]{4,})?$`).test(parts[1])
@@ -263,11 +276,25 @@ export function planAll(
       plan.locks.push(ws.id)
       continue
     }
-    // Already named by the plugin and still final: nothing to do.
-    if (record?.stage === 'final') continue
-
     const prefix = projectPrefix(ws.project, options.aliases)
     const auto = autoIds.has(ws.id) || record?.stage === 'standby'
+    const chatTopic = ws.chatTitle && topicFromChat(ws.chatTitle.title)
+    // A branch/standby is provisional; a title from the same chat can improve later.
+    // A meaningful workspace name that we did not generate is never replaced by a chat.
+    const acceptsChat = record
+      ? record.stage === 'standby' || record.source === 'branch' ||
+        (record.source === 'chat-title' && record.sourceKey === ws.chatTitle?.sourceKey)
+      : isSlug(ws.name) && !ws.name.includes(SEP)
+    if (chatTopic && acceptsChat) {
+      const after = `${prefix}${SEP}${chatTopic}`
+      if (after !== ws.name) {
+        const change: Change = { id: ws.id, before: ws.name, after, reason: 'chat-title', stage: 'final', sourceKey: ws.chatTitle!.sourceKey }
+        if (auto || record) plan.auto.push(change)
+        else plan.suggestions.push(change)
+      }
+      continue
+    }
+    if (record?.stage === 'final') continue
     // A standby is provisional. A later meaningful branch may promote it, even beyond
     // the new-workspace window; the record/name comparison above protects manual edits.
     const candidate = record?.stage === 'standby' ? { ...ws, name: '' } : ws
